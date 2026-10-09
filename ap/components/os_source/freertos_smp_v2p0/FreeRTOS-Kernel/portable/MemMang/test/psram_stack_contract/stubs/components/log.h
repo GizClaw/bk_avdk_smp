@@ -1,0 +1,4 @@
+#ifndef PSRAM_STACK_TEST_LOG_H
+#define PSRAM_STACK_TEST_LOG_H
+
+#endif

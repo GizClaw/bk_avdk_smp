@@ -407,6 +407,11 @@ typedef struct tskTaskControlBlock       /* The old naming convention is used to
  * below to enable the use of older kernel aware debuggers. */
 typedef tskTCB TCB_t;
 
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+#include "portable/MemMang/psram_stack_allocator.h"
+#include "cmsis_gcc.h"
+#endif
+
 /*lint -save -e956 A manual analysis and inspection has been used to determine
  * which static variables must be declared volatile. */
 portDONT_DISCARD PRIVILEGED_DATA TCB_t * volatile pxCurrentTCBs[ configNUMBER_OF_CORES ] = { NULL };
@@ -486,6 +491,154 @@ TimerHandle_t xCpupTimer;
 /* Spinlock required for SMP critical sections. This lock protects all of the
  * kernel's data structures such as various tasks lists, flags, and tick counts. */
 PRIVILEGED_DATA static SPINLOCK_SECTION portMUX_TYPE xKernelLock = portMUX_INITIALIZER_UNLOCKED;
+
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+
+    typedef enum
+    {
+        psramSTACK_FATAL_SPAN = 1,
+        psramSTACK_FATAL_RELEASE = 2,
+        psramSTACK_FATAL_ACQUIRE = 3,
+        psramSTACK_FATAL_CREATE_ROLLBACK = 4,
+        psramSTACK_FATAL_EXACT_FREE = 5,
+        psramSTACK_FATAL_GUARD = 6
+    } PsramStackFatalReason_t;
+
+    PRIVILEGED_DATA volatile uint32_t ulPsramStackFatalReason = 0U;
+    PRIVILEGED_DATA volatile BaseType_t xPsramStackFatalCore = -1;
+    PRIVILEGED_DATA volatile uint32_t ulPsramStackFatalStack = 0U;
+    PRIVILEGED_DATA const char * volatile pcPsramStackFatalTask = NULL;
+
+#if ( configUSE_CACHEABLE_PSRAM_TASK_STACK_PROFILE == 1 )
+
+    /* Bounds the scheduler-path cost of the stack clean/invalidate. Enabled by
+     * CONFIG_CACHEABLE_PSRAM_TASK_STACK_PROFILE only; the production build keeps
+     * the context switch free of the two cycle counter reads. */
+    extern uint32_t dwt_get_cycle_counter_val( void );
+    extern void dwt_init_cycle_counter( void );
+
+    typedef struct
+    {
+        uint32_t ulCount;
+        uint32_t ulMaxCycles;
+        uint64_t ullTotalCycles;
+    } PsramStackProfile_t;
+
+    PRIVILEGED_DATA static PsramStackProfile_t xPsramStackReleaseProfile;
+    PRIVILEGED_DATA static PsramStackProfile_t xPsramStackAcquireProfile;
+
+    /* Both accessors run unsynchronised against the scheduler that accumulates
+     * these counters. Taking the kernel lock here would put a diagnostic read
+     * on the same lock as the switch path; a torn sample of a statistics
+     * counter is the cheaper trade. */
+    void vPsramStackProfileReset( void )
+    {
+        const PsramStackProfile_t xEmpty = { 0 };
+
+        dwt_init_cycle_counter();
+        xPsramStackReleaseProfile = xEmpty;
+        xPsramStackAcquireProfile = xEmpty;
+    }
+
+    void vPsramStackProfileGet( uint32_t * const pulReleaseCount,
+                                uint32_t * const pulReleaseMaxCycles,
+                                uint64_t * const pullReleaseTotalCycles,
+                                uint32_t * const pulAcquireCount,
+                                uint32_t * const pulAcquireMaxCycles,
+                                uint64_t * const pullAcquireTotalCycles )
+    {
+        *pulReleaseCount = xPsramStackReleaseProfile.ulCount;
+        *pulReleaseMaxCycles = xPsramStackReleaseProfile.ulMaxCycles;
+        *pullReleaseTotalCycles = xPsramStackReleaseProfile.ullTotalCycles;
+        *pulAcquireCount = xPsramStackAcquireProfile.ulCount;
+        *pulAcquireMaxCycles = xPsramStackAcquireProfile.ulMaxCycles;
+        *pullAcquireTotalCycles = xPsramStackAcquireProfile.ullTotalCycles;
+    }
+
+    static void prvPsramStackProfileRecord( PsramStackProfile_t * const pxProfile,
+                                            const uint32_t ulCycles )
+    {
+        pxProfile->ulCount++;
+        pxProfile->ullTotalCycles += ( uint64_t ) ulCycles;
+
+        if( ulCycles > pxProfile->ulMaxCycles )
+        {
+            pxProfile->ulMaxCycles = ulCycles;
+        }
+    }
+
+    #define psramSTACK_PROFILE_ENTER() \
+    const uint32_t ulProfileStart = dwt_get_cycle_counter_val()
+    #define psramSTACK_PROFILE_EXIT( pxProfile ) \
+    prvPsramStackProfileRecord( ( pxProfile ), \
+                                dwt_get_cycle_counter_val() - ulProfileStart )
+
+#else /* configUSE_CACHEABLE_PSRAM_TASK_STACK_PROFILE */
+
+    #define psramSTACK_PROFILE_ENTER()           do {} while( 0 )
+    #define psramSTACK_PROFILE_EXIT( pxProfile ) do {} while( 0 )
+
+#endif /* configUSE_CACHEABLE_PSRAM_TASK_STACK_PROFILE */
+
+    const char * pcPsramStackFatalReasonName( void )
+    {
+        switch( ( PsramStackFatalReason_t ) ulPsramStackFatalReason )
+        {
+            case psramSTACK_FATAL_SPAN:            return "span";
+            case psramSTACK_FATAL_RELEASE:         return "release";
+            case psramSTACK_FATAL_ACQUIRE:         return "acquire";
+            case psramSTACK_FATAL_CREATE_ROLLBACK: return "create-rollback";
+            case psramSTACK_FATAL_EXACT_FREE:      return "exact-free";
+            case psramSTACK_FATAL_GUARD:           return "guard";
+            default:                               return "unknown";
+        }
+    }
+
+    static _Noreturn void prvPsramStackKernelFatal( const PsramStackFatalReason_t xReason )
+    {
+        const BaseType_t xCoreID = portGET_CORE_ID();
+        const TCB_t * const pxFatalTCB = pxCurrentTCBs[ xCoreID ];
+
+        ulPsramStackFatalReason = ( uint32_t ) xReason;
+        xPsramStackFatalCore = xCoreID;
+        /* Latch which stack tripped the invariant. The reset reason alone
+         * reduces every one of these to a generic crash assert, which is not
+         * enough to tell a corrupted guard from a mis-sized span in the field. */
+        ulPsramStackFatalStack =
+            ( pxFatalTCB != NULL ) ? ( uint32_t ) pxFatalTCB->pxStack : 0U;
+        pcPsramStackFatalTask =
+            ( pxFatalTCB != NULL ) ? pxFatalTCB->pcTaskName : NULL;
+        __DMB();
+        configPSRAM_STACK_FATAL_RESET();
+        portDISABLE_INTERRUPTS();
+
+        for( ; ; )
+        {
+        }
+    }
+
+    void vTaskCacheAcquireFirstStack( void )
+    {
+        const BaseType_t xCoreID = portGET_CORE_ID();
+        TCB_t * const pxTCB = pxCurrentTCBs[ xCoreID ];
+        int xStatus;
+
+        if( pxTCB == NULL )
+        {
+            prvPsramStackKernelFatal( psramSTACK_FATAL_SPAN );
+        }
+        xStatus = psram_stack_cache_acquire(
+            pxTCB->pxStack, pxTCB->ulStackSize );
+        if( xStatus != PSRAM_STACK_STATUS_OK )
+        {
+            prvPsramStackKernelFatal(
+                ( xStatus == PSRAM_STACK_STATUS_INVALID )
+                    ? psramSTACK_FATAL_SPAN
+                    : psramSTACK_FATAL_ACQUIRE );
+        }
+    }
+
+#endif
 
 /*lint -restore */
 
@@ -707,6 +860,9 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
  * under the control of the scheduler.
  */
 static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+    static void prvAddNewTaskToReadyListLocked( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
+#endif
 
 /*
  * freertos_tasks_c_additions_init() should only be called if the user definable
@@ -1132,12 +1288,8 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 }
 /*-----------------------------------------------------------*/
 
-static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB )
+static void prvAddNewTaskToReadyListLocked( TCB_t * pxNewTCB )
 {
-    /* Ensure interrupts don't access the task lists while the lists are being
-     * updated. */
-    taskENTER_CRITICAL( &xKernelLock );
-    {
         uxCurrentNumberOfTasks++;
 
         if( uxCurrentNumberOfTasks == ( UBaseType_t ) 1 )
@@ -1225,7 +1377,12 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB )
         {
             mtCOVERAGE_TEST_MARKER();
         }
-    }
+}
+
+static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB )
+{
+    taskENTER_CRITICAL( &xKernelLock );
+    prvAddNewTaskToReadyListLocked( pxNewTCB );
     taskEXIT_CRITICAL( &xKernelLock );
 
     /* SINGLE-CORE MODIFICATION: Extended critical section so that SMP can check
@@ -1244,14 +1401,14 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB )
         taskENTER_CRITICAL( &xKernelLock );
         {
             extern void pthread_internal_local_storage_destructor_callback(TaskHandle_t handle);
-            pthread_internal_local_storage_destructor_callback(xTaskToDelete);
-
             /* Get current core ID as we can no longer be preempted. */
             const BaseType_t xCurCoreID = portGET_CORE_ID();
 
             /* If null is passed in here then it is the calling task that is
              * being deleted. */
             pxTCB = prvGetTCBFromHandle( xTaskToDelete );
+
+            pthread_internal_local_storage_destructor_callback( pxTCB );
 
             /* Remove task from the ready/delayed list. */
             if( uxListRemove( &( pxTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
@@ -3752,9 +3909,50 @@ void vTaskSwitchContext( void )
             }
             #endif
 
+            #if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+            {
+                TCB_t * const pxOutgoingTCB = pxCurrentTCBs[ xCurCoreID ];
+                int xReleaseStatus;
+
+                psramSTACK_PROFILE_ENTER();
+                xReleaseStatus = psram_stack_cache_release(
+                    pxOutgoingTCB->pxStack, pxOutgoingTCB->ulStackSize );
+                psramSTACK_PROFILE_EXIT( &xPsramStackReleaseProfile );
+
+                if( xReleaseStatus != PSRAM_STACK_STATUS_OK )
+                {
+                    prvPsramStackKernelFatal(
+                        ( xReleaseStatus == PSRAM_STACK_STATUS_INVALID )
+                            ? psramSTACK_FATAL_SPAN
+                            : psramSTACK_FATAL_RELEASE );
+                }
+            }
+            #endif
+
             /* Select a new task to run using either the generic C or port
              * optimised asm code. */
             taskSELECT_HIGHEST_PRIORITY_TASK(); /*lint !e9079 void * is used as this macro is used with timers and co-routines too.  Alignment is known to be fine as the type of the pointer stored and retrieved is the same. */
+
+            #if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+            {
+                TCB_t * const pxIncomingTCB = pxCurrentTCBs[ xCurCoreID ];
+                int xAcquireStatus;
+
+                psramSTACK_PROFILE_ENTER();
+                xAcquireStatus = psram_stack_cache_acquire(
+                    pxIncomingTCB->pxStack, pxIncomingTCB->ulStackSize );
+                psramSTACK_PROFILE_EXIT( &xPsramStackAcquireProfile );
+
+                if( xAcquireStatus != PSRAM_STACK_STATUS_OK )
+                {
+                    prvPsramStackKernelFatal(
+                        ( xAcquireStatus == PSRAM_STACK_STATUS_INVALID )
+                            ? psramSTACK_FATAL_SPAN
+                            : psramSTACK_FATAL_ACQUIRE );
+                }
+            }
+            #endif
+
             traceTASK_SWITCHED_IN();
         #if FREERTOS_TASK_RECORDER
              if (xCurCoreID == 0)
@@ -4858,6 +5056,23 @@ static void prvCheckTasksWaitingTermination( void )
 
     static void prvDeleteTCB( TCB_t * pxTCB )
     {
+        #if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+        void * pvSpanStart;
+        size_t xSpanSize;
+
+        const psram_stack_span_result_t xSpanResult =
+            psram_stack_owner_span(
+                pxTCB->pxStack,
+                pxTCB->ulStackSize,
+                &pvSpanStart,
+                &xSpanSize );
+
+        if( xSpanResult == PSRAM_STACK_SPAN_INVALID )
+        {
+            prvPsramStackKernelFatal( psramSTACK_FATAL_SPAN );
+        }
+        #endif
+
         /* This call is required specifically for the TriCore port.  It must be
          * above the vPortFree() calls.  The call is also used by ports/demos that
          * want to allocate and clean RAM statically. */
@@ -4868,6 +5083,60 @@ static void prvCheckTasksWaitingTermination( void )
             /* Free up the memory allocated for the task's TLS Block. */
             /* Note: Fixed bug in upstream. Free TLS block of pxTCB, NOT pxCurrentTCBs */
             configDEINIT_TLS_BLOCK( pxTCB->xTLSBlock );
+        }
+        #endif
+
+        #if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+        {
+            BaseType_t locked_out = pdFALSE;
+            psram_stack_pm_transition_t xPmTransition = {
+                PSRAM_STACK_PM_TRANSITION_NONE, 0U
+            };
+
+            if( xSpanResult == PSRAM_STACK_SPAN_VALID )
+            {
+                const int xFreeStatus =
+                    psram_stack_free_exact_with_transition(
+                        pxTCB->pxStack, pxTCB->ulStackSize,
+                        &xPmTransition );
+
+                ( void ) pvSpanStart;
+                ( void ) xSpanSize;
+                if( xFreeStatus != PSRAM_STACK_STATUS_OK )
+                {
+                    prvPsramStackKernelFatal(
+                        ( xFreeStatus == PSRAM_STACK_STATUS_GUARD_ERROR )
+                            ? psramSTACK_FATAL_GUARD
+                            : psramSTACK_FATAL_EXACT_FREE );
+                }
+                if( xPmTransition.kind
+                    == PSRAM_STACK_PM_TRANSITION_LAST_FREE )
+                {
+                    if( configPSRAM_STACK_PM_VOTE_RELEASED() != BK_OK )
+                    {
+                        locked_out = pdTRUE;
+                        if( psram_stack_pm_hold_release_abort(
+                                xPmTransition.generation )
+                            != PSRAM_STACK_STATUS_OK )
+                        {
+                            prvPsramStackKernelFatal(
+                                psramSTACK_FATAL_EXACT_FREE );
+                        }
+                    }
+                    else if( psram_stack_pm_hold_release_commit(
+                                 xPmTransition.generation )
+                             != PSRAM_STACK_STATUS_OK )
+                    {
+                        prvPsramStackKernelFatal(
+                            psramSTACK_FATAL_EXACT_FREE );
+                    }
+                }
+                ( void ) locked_out;
+                vPortFree( pxTCB );
+                ( void ) pvSpanStart;
+                ( void ) xSpanSize;
+                return;
+            }
         }
         #endif
 

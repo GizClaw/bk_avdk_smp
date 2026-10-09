@@ -22,12 +22,18 @@
 #include "freertos_additions.h"
 #include <os/mem.h>
 
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+#include "../../portable/MemMang/psram_stack_allocator.h"
+#endif
+
 /*
  * Both StaticTask_t and TCB_t structures are provided by FreeRTOS sources.
  * This is just an additional check of the consistency of these structures.
  */
 _Static_assert( offsetof( StaticTask_t, pxDummy6 ) == offsetof( TCB_t, pxStack ) );
 _Static_assert( offsetof( StaticTask_t, pxDummy8 ) == offsetof( TCB_t, pxEndOfStack ) );
+_Static_assert( sizeof( TCB_t ) == sizeof( StaticTask_t ) );
+_Static_assert( _Alignof( TCB_t ) == _Alignof( StaticTask_t ) );
 
 /* ------------------------------------------------- Kernel Control ------------------------------------------------- */
 
@@ -144,6 +150,128 @@ _Static_assert( offsetof( StaticTask_t, pxDummy8 ) == offsetof( TCB_t, pxEndOfSt
 /* -------------------------------------------------- Task Creation ------------------------------------------------- */
 
 #if ( configSUPPORT_DYNAMIC_ALLOCATION == 1 )
+
+    #if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+
+        static void prvFreeUnpublishedCacheablePsramTask(
+            TCB_t * const pxTCB,
+            void * const pvStack,
+            const size_t xStackSize,
+            const BaseType_t xTcbInitialized )
+        {
+            psram_stack_pm_transition_t xTransition = {
+                PSRAM_STACK_PM_TRANSITION_NONE, 0U
+            };
+
+            if( ( pxTCB != NULL ) && ( xTcbInitialized != pdFALSE ) )
+            {
+                #if ( ( configUSE_NEWLIB_REENTRANT == 1 ) || ( configUSE_C_RUNTIME_TLS_SUPPORT == 1 ) )
+                {
+                    configDEINIT_TLS_BLOCK( pxTCB->xTLSBlock );
+                }
+                #endif
+            }
+            const int xFreeStatus = psram_stack_free_exact_with_transition(
+                pvStack, xStackSize, &xTransition );
+
+            if( xFreeStatus != PSRAM_STACK_STATUS_OK )
+            {
+                prvPsramStackKernelFatal(
+                    psramSTACK_FATAL_CREATE_ROLLBACK );
+            }
+            if( xTransition.kind == PSRAM_STACK_PM_TRANSITION_LAST_FREE )
+            {
+                if( configPSRAM_STACK_PM_VOTE_RELEASED() == BK_OK )
+                {
+                    if( psram_stack_pm_hold_release_commit(
+                            xTransition.generation )
+                        != PSRAM_STACK_STATUS_OK )
+                    {
+                        prvPsramStackKernelFatal(
+                            psramSTACK_FATAL_CREATE_ROLLBACK );
+                    }
+                }
+                else if( psram_stack_pm_hold_release_abort(
+                             xTransition.generation )
+                         != PSRAM_STACK_STATUS_OK )
+                {
+                    prvPsramStackKernelFatal(
+                        psramSTACK_FATAL_CREATE_ROLLBACK );
+                }
+            }
+            if( pxTCB != NULL )
+            {
+                vPortFree( pxTCB );
+            }
+        }
+
+        static BaseType_t prvAllocateCacheablePsramTask(
+            const uint32_t ulStackDepth,
+            TCB_t ** const ppxNewTCB,
+            psram_stack_pm_transition_t * const pxTransition )
+        {
+            void * pvStack;
+            TCB_t * pxNewTCB;
+            const size_t xStackSize = ( ( size_t ) ulStackDepth ) * sizeof( StackType_t );
+
+            if( psram_stack_alloc_with_transition(
+                    xStackSize, &pvStack, pxTransition )
+                != PSRAM_STACK_STATUS_OK )
+            {
+                return errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+            }
+
+            pxNewTCB = ( TCB_t * ) psram_malloc( sizeof( TCB_t ) );
+            if( pxNewTCB == NULL )
+            {
+                prvFreeUnpublishedCacheablePsramTask(
+                    NULL, pvStack, xStackSize, pdFALSE );
+                return errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+            }
+
+            memset( ( void * ) pxNewTCB, 0x00, sizeof( TCB_t ) );
+            pxNewTCB->pxStack = ( StackType_t * ) pvStack;
+
+            #if ( tskSTATIC_AND_DYNAMIC_ALLOCATION_POSSIBLE != 0 )
+            {
+                pxNewTCB->ucStaticallyAllocated = tskDYNAMICALLY_ALLOCATED_STACK_AND_TCB;
+            }
+            #endif
+
+            *ppxNewTCB = pxNewTCB;
+            return pdPASS;
+        }
+
+        static BaseType_t prvResyncPendingCacheablePsramHold( void )
+        {
+            uint64_t ullPendingGeneration = 0U;
+
+            if( psram_stack_pm_hold_release_claim( &ullPendingGeneration )
+                != PSRAM_STACK_STATUS_OK )
+            {
+                return pdFAIL;
+            }
+            if( configPSRAM_STACK_PM_VOTE_RELEASED() != BK_OK )
+            {
+                if( psram_stack_pm_hold_release_abort( ullPendingGeneration )
+                    != PSRAM_STACK_STATUS_OK )
+                {
+                    prvPsramStackKernelFatal(
+                        psramSTACK_FATAL_CREATE_ROLLBACK );
+                }
+                return pdFAIL;
+            }
+            if( psram_stack_pm_hold_release_commit( ullPendingGeneration )
+                != PSRAM_STACK_STATUS_OK )
+            {
+                prvPsramStackKernelFatal(
+                    psramSTACK_FATAL_CREATE_ROLLBACK );
+            }
+            return pdPASS;
+        }
+
+    #endif
+
  
     BaseType_t xTaskCreate_ex( TaskFunction_t pxTaskCode,
                                 const char * const pcName,
@@ -348,8 +476,119 @@ _Static_assert( offsetof( StaticTask_t, pxDummy8 ) == offsetof( TCB_t, pxEndOfSt
                             TaskHandle_t * const pxCreatedTask,
                             const BaseType_t xCoreID)
     {
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+        BaseType_t xReturn = pdFAIL;
+        BaseType_t xTcbInitialized = pdFALSE;
+        BaseType_t xPM_IS_ACTIVE = pdFALSE;
+        TCB_t * pxNewTCB = NULL;
+        psram_stack_pm_transition_t xPmTransition = {
+            PSRAM_STACK_PM_TRANSITION_NONE, 0U
+        };
+
+        configASSERT( taskVALID_CORE_ID( xCoreID ) == pdTRUE || xCoreID == tskNO_AFFINITY );
+        if( ( xPortInIsrContext() != pdFALSE )
+            || ( platform_local_irq_disabled() != false )
+            || ( xSchedulerRunning == pdFALSE ) )
+        {
+            return pdFAIL;
+        }
+        if( configPSRAM_STACK_PM_ENSURE_READY() != BK_OK )
+        {
+            return pdFAIL;
+        }
+        xReturn = prvAllocateCacheablePsramTask(
+            ( uint32_t ) usStackDepth, &pxNewTCB, &xPmTransition );
+        if( ( xReturn != pdPASS )
+            && ( prvResyncPendingCacheablePsramHold() == pdPASS ) )
+        {
+            xPmTransition.kind = PSRAM_STACK_PM_TRANSITION_NONE;
+            xPmTransition.generation = 0U;
+            xReturn = prvAllocateCacheablePsramTask(
+                ( uint32_t ) usStackDepth, &pxNewTCB, &xPmTransition );
+        }
+        if( ( xReturn == pdPASS )
+            && ( xPmTransition.kind != PSRAM_STACK_PM_TRANSITION_NONE )
+            && ( xPmTransition.kind
+                != PSRAM_STACK_PM_TRANSITION_FIRST_LIVE ) )
+        {
+            prvPsramStackKernelFatal(
+                psramSTACK_FATAL_CREATE_ROLLBACK );
+        }
+        if( xReturn == pdPASS )
+        {
+            taskENTER_CRITICAL( &xKernelLock );
+            {
+                prvInitialiseNewTask( pxTaskCode, pcName,
+                                      ( uint32_t ) usStackDepth,
+                                      pvParameters, uxPriority, NULL,
+                                      pxNewTCB, NULL, xCoreID );
+                xTcbInitialized = pdTRUE;
+                if( psram_stack_cache_release(
+                        pxNewTCB->pxStack,
+                        pxNewTCB->ulStackSize )
+                    != PSRAM_STACK_STATUS_OK )
+                {
+                    xReturn = errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+                }
+            }
+            taskEXIT_CRITICAL( &xKernelLock );
+
+            if( xReturn == pdPASS )
+            {
+                if( configPSRAM_STACK_PM_VOTE_ACTIVE() == BK_OK )
+                {
+                    xPM_IS_ACTIVE = pdTRUE;
+                }
+                else
+                {
+                    xReturn = errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
+                }
+            }
+            if( xReturn != pdPASS )
+            {
+                prvFreeUnpublishedCacheablePsramTask(
+                    pxNewTCB, pxNewTCB->pxStack,
+                    pxNewTCB->ulStackSize, xTcbInitialized );
+            }
+            else
+            {
+                taskENTER_CRITICAL( &xKernelLock );
+                if( xPM_IS_ACTIVE != pdFALSE )
+                {
+                    #define prvAddNewTaskToReadyList( task ) \
+                        prvAddNewTaskToReadyListLocked( task )
+                    prvAddNewTaskToReadyList( pxNewTCB );
+                    #undef prvAddNewTaskToReadyList
+                    if( pxCreatedTask != NULL )
+                    {
+                        *pxCreatedTask = ( TaskHandle_t ) pxNewTCB;
+                    }
+                }
+                taskEXIT_CRITICAL( &xKernelLock );
+            }
+        }
+        return xReturn;
+#else
         return xTaskCreate_ex(pxTaskCode, pcName, usStackDepth, pvParameters, uxPriority, pxCreatedTask, xCoreID, HEAP_MEM_TYPE_PSRAM);
+#endif
     }
+
+    #if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+
+        BaseType_t xTaskCreateInNoncachePsram( TaskFunction_t pxTaskCode,
+                                               const char * const pcName,
+                                               const configSTACK_DEPTH_TYPE usStackDepth,
+                                               void * const pvParameters,
+                                               UBaseType_t uxPriority,
+                                               TaskHandle_t * const pxCreatedTask,
+                                               const BaseType_t xCoreID )
+        {
+            return xTaskCreate_ex( pxTaskCode, pcName, usStackDepth, pvParameters,
+                                   uxPriority, pxCreatedTask, xCoreID,
+                                   HEAP_MEM_TYPE_PSRAM );
+        }
+
+    #endif
 
     
 

@@ -104,6 +104,15 @@ task.h is included from an application file. */
 #include <driver/pwr_clk.h>
 #include "stack_base.h"
 
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+#include "cache_psram_stack_internal.h"
+#include "psram_stack_allocator.h"
+#endif
+
+#ifndef __DMB
+#define __DMB() __asm volatile ("dmb" ::: "memory")
+#endif
+
 #if CONFIG_MEM_DEBUG_OVERFLOW
 // #include "dwt.h"
 // #include "driver/aon_rtc.h"
@@ -208,6 +217,52 @@ typedef struct A_BLOCK_LINK
 #endif
 } BlockLink_t;
 
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+
+#define PSRAM_STACK_CACHE_LINE_SIZE 32U
+#define PSRAM_STACK_CACHE_LINE_MASK (PSRAM_STACK_CACHE_LINE_SIZE - 1U)
+#define PSRAM_STACK_GUARD_SIZE PSRAM_STACK_CACHE_LINE_SIZE
+
+typedef struct {
+	BlockLink_t block;
+#if !CONFIG_MEM_DEBUG
+	size_t requestedSize;
+#endif
+} PsramStackBlock_t;
+
+typedef struct {
+	PsramStackBlock_t *first;
+	PsramStackBlock_t *sentinel;
+	size_t first_size;
+	size_t allocated_bit;
+} PsramStackInitPlan_t;
+
+typedef struct {
+	PsramStackBlock_t *previous;
+	PsramStackBlock_t *block;
+	PsramStackBlock_t *split;
+	size_t allocated_size;
+} PsramStackAllocPlan_t;
+
+typedef struct {
+	PsramStackBlock_t *block;
+	PsramStackBlock_t *previous;
+	PsramStackBlock_t *next;
+	size_t block_size;
+	bool merge_previous;
+	bool merge_next;
+	int span_status;
+} PsramStackFreePlan_t;
+
+#define PSRAM_STACK_HEADER_SIZE \
+	((sizeof(PsramStackBlock_t) + PSRAM_STACK_CACHE_LINE_MASK) \
+		& ~((size_t)PSRAM_STACK_CACHE_LINE_MASK))
+#define PSRAM_STACK_MINIMUM_BLOCK_SIZE \
+	(PSRAM_STACK_HEADER_SIZE + PSRAM_STACK_CACHE_LINE_SIZE \
+		+ PSRAM_STACK_GUARD_SIZE)
+
+#endif
+
 /*-----------------------------------------------------------*/
 
 /*
@@ -284,8 +339,35 @@ static BlockLink_t psram_xStart, *psram_pxEnd = NULL;
 fragmentation. */
 static size_t psram_xFreeBytesRemaining = 0U;
 static size_t psram_xMinimumEverFreeBytesRemaining = 0U;
+static uint32_t s_psram_power_inflight = 0U;
+static uint32_t s_psram_stack_pm_provisional_hold = 0U;
+
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+static PsramStackBlock_t s_psram_stack_start;
+static PsramStackBlock_t *s_psram_stack_end = NULL;
+static size_t s_psram_stack_free_bytes = 0U;
+static size_t s_psram_stack_minimum_ever_free_bytes = 0U;
+static volatile uint32_t s_psram_stack_live_count = 0U;
+static uint64_t s_psram_stack_pm_hold_generation = 0U;
+static uint64_t s_psram_stack_pm_hold_claim_generation = 0U;
+static uint64_t s_psram_stack_pm_generation = 0U;
+static int psram_heaps_rebuild_after_power_down_locked(void);
+#endif
 
 static volatile uint32_t s_psram_used_count = 0;
+
+typedef enum {
+	PSRAM_POWER_GUARD_BUSY = -1,
+	PSRAM_POWER_GUARD_DIRECT = 0,
+	PSRAM_POWER_GUARD_LEADER = 1,
+} PsramPowerGuardResult_t;
+
+static PsramPowerGuardResult_t psram_stack_prepare_power_locked(
+	bool stack_allocation);
+static bool psram_power_provisional_owned_locked(void);
+static bool psram_stack_inflight_mutation_reject_locked(void);
+static void psram_stack_release_provisional_locked(bool provisional);
+static void psram_power_guard_fatal_locked(void);
 
 void rtos_regist_plat_dump_hook(uint32_t reg_base_addr, uint32_t reg_size);
 
@@ -368,8 +450,6 @@ __attribute__((section(".itcm_sec_code"))) void bk_psram_heap_init(void) {
 	INIT_LIST_HEAD(&xPsramUsed);
 	#endif
 
-	s_psram_used_count = 0;
-	FIXED_ADDR_PSRAM_USDE_COUNT = 0;
 }
 
 static void psram_prvInsertBlockIntoFreeList( BlockLink_t *pxBlockToInsert )
@@ -599,6 +679,16 @@ static uint32_t get_memory_end(BlockLink_t *pxLink) {
 	return mem_end;
 }
 
+#if !defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) || !CONFIG_CACHEABLE_PSRAM_TASK_STACK
+static void psram_heap_recover_power_down_legacy(void)
+{
+	if (FIXED_ADDR_PSRAM_POWER_DOWN == PM_PSRAM_POWER_DOWN_MAGIC) {
+		bk_psram_heap_init_flag_set(false);
+		FIXED_ADDR_PSRAM_POWER_DOWN = 0U;
+	}
+}
+#endif
+
 #if CONFIG_MALLOC_STATIS || CONFIG_MEM_DEBUG
 void *psram_malloc_cm(const char *call_func_name, int line, size_t xWantedSize, int need_zero )
 #else
@@ -606,6 +696,9 @@ void *psram_malloc( size_t xWantedSize )
 #endif
 {
 	void *pvReturn = NULL;
+	PsramPowerGuardResult_t power_guard;
+	bool provisional = false;
+	int power_result;
 
 #if CONFIG_MEM_DEBUG_OVERFLOW
 	uint32_t lr = __get_LR();
@@ -629,25 +722,63 @@ void *psram_malloc( size_t xWantedSize )
 		/* 4 Byte alignment required for psram. */
 		xWantedSize += ( 0x4 - ( xWantedSize & 0x3 ) );
 	}
-	if(FIXED_ADDR_PSRAM_POWER_DOWN == PM_PSRAM_POWER_DOWN_MAGIC)
-	{
-		bk_psram_heap_init_flag_set(false);
-		FIXED_ADDR_PSRAM_POWER_DOWN = 0x0;
-	}
-
-	if( psram_pxEnd == NULL || !bk_psram_heap_init_flag_get())
-	{
-		bk_pm_module_vote_psram_ctrl(PM_POWER_PSRAM_MODULE_NAME_AS_MEM,PM_POWER_MODULE_STATE_ON);
-	}
 	//vTaskSuspendAll();
 #if CONFIG_FREERTOS_SMP
 	HeapEnterCritical();
 #endif
+	power_guard = psram_stack_prepare_power_locked(false);
+	if (power_guard == PSRAM_POWER_GUARD_BUSY) {
+		HeapExitCritical();
+		return NULL;
+	}
+	if ((power_guard == PSRAM_POWER_GUARD_DIRECT)
+		&& (s_psram_used_count == UINT32_MAX)) {
+		psram_power_guard_fatal_locked();
+		HeapExitCritical();
+		return NULL;
+	}
+	if (power_guard == PSRAM_POWER_GUARD_LEADER) {
+		provisional = true;
+		HeapExitCritical();
+		power_result = bk_pm_module_vote_psram_ctrl(
+			PM_POWER_PSRAM_MODULE_NAME_AS_MEM,
+			PM_POWER_MODULE_STATE_ON);
+		HeapEnterCritical();
+		if (power_result != BK_OK) {
+			psram_stack_release_provisional_locked(provisional);
+			HeapExitCritical();
+			return NULL;
+		}
+		if (!psram_power_provisional_owned_locked()) {
+			HeapExitCritical();
+			return NULL;
+		}
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+		if (psram_heaps_rebuild_after_power_down_locked() != 0) {
+			__DMB();
+			configPSRAM_STACK_FATAL_RESET();
+			HeapExitCritical();
+			return NULL;
+		}
+#else
+		psram_heap_recover_power_down_legacy();
+#endif
+	}
 	pvReturn = psram_malloc_without_lock(xWantedSize  + MEM_CHECK_TAG_LEN);
 	if(pvReturn)
 	{
-		s_psram_used_count++;
-		FIXED_ADDR_PSRAM_USDE_COUNT += 1;
+		if (provisional) {
+			if (!psram_power_provisional_owned_locked()) {
+				HeapExitCritical();
+				return NULL;
+			}
+			s_psram_stack_pm_provisional_hold = 0U;
+			s_psram_power_inflight = 0U;
+		} else {
+			s_psram_used_count++;
+			FIXED_ADDR_PSRAM_USDE_COUNT += 1;
+		}
+		__DMB();
 #if CONFIG_MALLOC_STATIS || CONFIG_MEM_DEBUG
 		BlockLink_t *pxLink = (BlockLink_t *)((u8*)pvReturn - xHeapStructSize);
 		if(pvReturn && call_func_name) {
@@ -689,6 +820,8 @@ void *psram_malloc( size_t xWantedSize )
 		}
 #endif
 #endif //#if CONFIG_MALLOC_STATIS || CONFIG_MEM_DEBUG
+	} else {
+		psram_stack_release_provisional_locked(provisional);
 	}
 
 #if CONFIG_MEM_DEBUG_OVERFLOW
@@ -748,7 +881,1228 @@ void * psram_calloc(size_t num, size_t size)
     return ptr;
 }
 
+static PsramPowerGuardResult_t psram_stack_prepare_power_locked(
+	bool stack_allocation)
+{
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+	if (stack_allocation) {
+		if (s_psram_stack_pm_hold_generation != 0U) {
+			return PSRAM_POWER_GUARD_BUSY;
+		}
+	}
+#else
+	(void)stack_allocation;
+#endif
+	if (s_psram_power_inflight != 0U) {
+		return PSRAM_POWER_GUARD_BUSY;
+	}
+	if ((s_psram_used_count != FIXED_ADDR_PSRAM_USDE_COUNT)
+		|| (s_psram_stack_pm_provisional_hold != 0U)) {
+		psram_power_guard_fatal_locked();
+		return PSRAM_POWER_GUARD_BUSY;
+	}
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+	if ((s_psram_stack_live_count > s_psram_used_count)
+		|| ((s_psram_stack_pm_hold_generation != 0U)
+			&& (s_psram_used_count == 0U))) {
+		psram_power_guard_fatal_locked();
+		return PSRAM_POWER_GUARD_BUSY;
+	}
+#endif
+	if (s_psram_used_count != 0U) {
+		if (FIXED_ADDR_PSRAM_POWER_DOWN == PM_PSRAM_POWER_DOWN_MAGIC) {
+			psram_power_guard_fatal_locked();
+			return PSRAM_POWER_GUARD_BUSY;
+		}
+		return PSRAM_POWER_GUARD_DIRECT;
+	}
+	s_psram_power_inflight = 1U;
+	s_psram_stack_pm_provisional_hold = 1U;
+	s_psram_used_count++;
+	FIXED_ADDR_PSRAM_USDE_COUNT++;
+	__DMB();
+	return PSRAM_POWER_GUARD_LEADER;
+}
+
+static void psram_stack_release_provisional_locked(bool provisional)
+{
+	if (!provisional) {
+		return;
+	}
+	if ((s_psram_power_inflight != 1U)
+		|| (s_psram_stack_pm_provisional_hold != 1U)
+		|| (s_psram_used_count != 1U)
+		|| (FIXED_ADDR_PSRAM_USDE_COUNT != 1U)) {
+		psram_power_guard_fatal_locked();
+		return;
+	}
+	s_psram_used_count--;
+	FIXED_ADDR_PSRAM_USDE_COUNT--;
+	s_psram_stack_pm_provisional_hold = 0U;
+	s_psram_power_inflight = 0U;
+	__DMB();
+}
+
+static bool psram_power_provisional_owned_locked(void)
+{
+	if ((s_psram_power_inflight == 1U)
+		&& (s_psram_stack_pm_provisional_hold == 1U)
+		&& (s_psram_used_count == 1U)
+		&& (FIXED_ADDR_PSRAM_USDE_COUNT == 1U)) {
+		return true;
+	}
+	psram_power_guard_fatal_locked();
+	return false;
+}
+
+static bool psram_stack_inflight_mutation_reject_locked(void)
+{
+	return (s_psram_power_inflight != 0U)
+		|| (s_psram_stack_pm_provisional_hold != 0U);
+}
+
+static void psram_power_guard_fatal_locked(void)
+{
+	__DMB();
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+	configPSRAM_STACK_FATAL_RESET();
+#endif
+}
+
 #endif //#if CONFIG_PSRAM_AS_SYS_MEMORY
+
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+
+static int psram_stack_heap_bounds(uintptr_t *heap_start, uintptr_t *heap_end)
+{
+	const uintptr_t start = (uintptr_t)CONFIG_AP_PSRAM_STACK_HEAP_ADDR;
+	const size_t size = (size_t)CONFIG_AP_PSRAM_STACK_HEAP_SIZE;
+
+	if ((size == 0U)
+		|| ((start & PSRAM_STACK_CACHE_LINE_MASK) != 0U)
+		|| ((size & PSRAM_STACK_CACHE_LINE_MASK) != 0U)
+		|| (size > (size_t)(UINTPTR_MAX - start))) {
+		return -1;
+	}
+	*heap_start = start;
+	*heap_end = start + size;
+	return 0;
+}
+
+static bool psram_stack_address_in_heap(const void *address)
+{
+	uintptr_t heap_start;
+	uintptr_t heap_end;
+	const uintptr_t value = (uintptr_t)address;
+
+	if ((address == NULL)
+		|| (psram_stack_heap_bounds(&heap_start, &heap_end) != 0)) {
+		return false;
+	}
+	return (value >= heap_start) && (value < heap_end);
+}
+
+static size_t psram_stack_requested_size(const PsramStackBlock_t *block)
+{
+#if CONFIG_MEM_DEBUG
+	return (size_t)block->block.wantedSize;
+#else
+	return block->requestedSize;
+#endif
+}
+
+static int psram_stack_requested_size_storable(size_t requested_size)
+{
+#if CONFIG_MEM_DEBUG
+	return requested_size <= UINT32_MAX;
+#else
+	(void)requested_size;
+	return 1;
+#endif
+}
+
+static void psram_stack_store_requested_size(
+	PsramStackBlock_t *block, size_t requested_size)
+{
+#if CONFIG_MEM_DEBUG
+	block->block.wantedSize = (uint32_t)requested_size;
+#else
+	block->requestedSize = requested_size;
+#endif
+}
+
+static int psram_stack_align_request(size_t requested_size, size_t *padded_size)
+{
+	if ((requested_size == 0U)
+		|| (requested_size > (SIZE_MAX - PSRAM_STACK_CACHE_LINE_MASK))) {
+		return -1;
+	}
+	*padded_size = (requested_size + PSRAM_STACK_CACHE_LINE_MASK)
+		& ~((size_t)PSRAM_STACK_CACHE_LINE_MASK);
+	return 0;
+}
+
+psram_stack_span_result_t psram_stack_owner_span(
+	const void *pxStack,
+	size_t ulStackSize,
+	void **span_start,
+	size_t *span_size)
+{
+	uintptr_t heap_start;
+	uintptr_t heap_end;
+	const uintptr_t stack_start = (uintptr_t)pxStack;
+	size_t padded_size;
+	size_t ownership_size;
+
+	if ((span_start == NULL) || (span_size == NULL)) {
+		return PSRAM_STACK_SPAN_INVALID;
+	}
+	*span_start = NULL;
+	*span_size = 0U;
+	if ((pxStack == NULL)
+		|| (psram_stack_heap_bounds(&heap_start, &heap_end) != 0)
+		|| (psram_stack_align_request(ulStackSize, &padded_size) != 0)
+		|| (padded_size > (SIZE_MAX - PSRAM_STACK_GUARD_SIZE))
+		|| (padded_size > (size_t)(UINTPTR_MAX - stack_start))) {
+		return PSRAM_STACK_SPAN_INVALID;
+	}
+	/* Membership is decided from the stack extent alone. The trailing guard
+	 * line is allocator metadata that exists only for stacks carved out of the
+	 * cacheable heap, so counting it here would make a non-cacheable stack that
+	 * merely ends at the heap base look like it reaches into the heap. The
+	 * ordinary PSRAM heap is laid out immediately below the stack heap, so that
+	 * misread is reachable and would fail-stop a legitimate task teardown. */
+	if (((stack_start + padded_size) <= heap_start)
+		|| (stack_start >= heap_end)) {
+		return PSRAM_STACK_SPAN_NOT_CACHEABLE;
+	}
+	ownership_size = padded_size + PSRAM_STACK_GUARD_SIZE;
+	if ((stack_start < heap_start)
+		|| (ownership_size > (size_t)(UINTPTR_MAX - stack_start))
+		|| ((stack_start + ownership_size) > heap_end)
+		|| ((stack_start & PSRAM_STACK_CACHE_LINE_MASK) != 0U)) {
+		return PSRAM_STACK_SPAN_INVALID;
+	}
+	*span_start = (void *)pxStack;
+	*span_size = ownership_size;
+	return PSRAM_STACK_SPAN_VALID;
+}
+
+static int psram_stack_metadata_acquire(PsramStackBlock_t *block)
+{
+	return cache_stack_acquire_aligned(block, PSRAM_STACK_HEADER_SIZE);
+}
+
+static int psram_stack_metadata_clean(PsramStackBlock_t *block)
+{
+	return cache_stack_metadata_clean_aligned(block, PSRAM_STACK_HEADER_SIZE);
+}
+
+static int psram_stack_block_size_valid(
+	const PsramStackBlock_t *block, size_t block_size, uintptr_t sentinel)
+{
+	const uintptr_t block_start = (uintptr_t)block;
+
+	return (block_size >= PSRAM_STACK_MINIMUM_BLOCK_SIZE)
+		&& ((block_size & PSRAM_STACK_CACHE_LINE_MASK) == 0U)
+		&& ((block_start & PSRAM_STACK_CACHE_LINE_MASK) == 0U)
+		&& (block_start < sentinel)
+		&& (block_size <= (size_t)(sentinel - block_start));
+}
+
+static int psram_stack_prepare_init(PsramStackInitPlan_t *plan)
+{
+	uintptr_t heap_start;
+	uintptr_t heap_end;
+	const size_t allocated_bit =
+		((size_t)1U) << ((sizeof(size_t) * heapBITS_PER_BYTE) - 1U);
+
+	if ((psram_stack_heap_bounds(&heap_start, &heap_end) != 0)
+		|| (PSRAM_STACK_HEADER_SIZE < sizeof(PsramStackBlock_t))
+		|| ((PSRAM_STACK_HEADER_SIZE & PSRAM_STACK_CACHE_LINE_MASK) != 0U)
+		|| ((heap_end - heap_start) <
+			(PSRAM_STACK_MINIMUM_BLOCK_SIZE + PSRAM_STACK_HEADER_SIZE))) {
+		return -1;
+	}
+	if ((xBlockAllocatedBit != 0U)
+		&& (xBlockAllocatedBit != allocated_bit)) {
+		return -1;
+	}
+	plan->first = (PsramStackBlock_t *)heap_start;
+	plan->sentinel =
+		(PsramStackBlock_t *)(heap_end - PSRAM_STACK_HEADER_SIZE);
+	plan->first_size =
+		(size_t)((uintptr_t)plan->sentinel - heap_start);
+	plan->allocated_bit = allocated_bit;
+	if ((cache_stack_acquire_aligned(
+			plan->first, PSRAM_STACK_HEADER_SIZE) != 0)
+		|| (cache_stack_acquire_aligned(
+			plan->sentinel, PSRAM_STACK_HEADER_SIZE) != 0)
+		|| (psram_stack_metadata_clean(plan->first) != 0)
+		|| (psram_stack_metadata_clean(plan->sentinel) != 0)) {
+		return -1;
+	}
+	return 0;
+}
+
+static void psram_stack_commit_init(const PsramStackInitPlan_t *plan)
+{
+	os_memset(plan->first, 0, PSRAM_STACK_HEADER_SIZE);
+	os_memset(plan->sentinel, 0, PSRAM_STACK_HEADER_SIZE);
+	plan->first->block.xBlockSize = plan->first_size;
+	plan->first->block.pxNextFreeBlock = &plan->sentinel->block;
+	cache_stack_metadata_clean_commit(
+		plan->first, PSRAM_STACK_HEADER_SIZE);
+	cache_stack_metadata_clean_commit(
+		plan->sentinel, PSRAM_STACK_HEADER_SIZE);
+
+	os_memset(&s_psram_stack_start, 0, sizeof(s_psram_stack_start));
+	s_psram_stack_start.block.pxNextFreeBlock = &plan->first->block;
+	s_psram_stack_end = plan->sentinel;
+	s_psram_stack_free_bytes = plan->first_size;
+	s_psram_stack_minimum_ever_free_bytes = plan->first_size;
+	xBlockAllocatedBit = plan->allocated_bit;
+}
+
+static int psram_stack_heap_init_locked(void)
+{
+	PsramStackInitPlan_t plan;
+
+	if (s_psram_stack_end != NULL) {
+		return 0;
+	}
+	if (psram_stack_prepare_init(&plan) != 0) {
+		return -1;
+	}
+	psram_stack_commit_init(&plan);
+	return 0;
+}
+
+static int psram_ordinary_prepare_rebuild(
+	BlockLink_t **first, uintptr_t *end)
+{
+	uintptr_t start = (uintptr_t)PSRAM_START_ADDRESS;
+
+	if ((start & portBYTE_ALIGNMENT_MASK) != 0U) {
+		start = (start + portBYTE_ALIGNMENT_MASK)
+			& ~((uintptr_t)portBYTE_ALIGNMENT_MASK);
+	}
+	if (PSRAM_HEAP_SIZE <= (start
+			- (uintptr_t)PSRAM_START_ADDRESS + xHeapStructSize)) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	*end = (uintptr_t)PSRAM_START_ADDRESS + PSRAM_HEAP_SIZE
+		- xHeapStructSize;
+	*end &= ~((uintptr_t)portBYTE_ALIGNMENT_MASK);
+	*first = (BlockLink_t *)start;
+	return PSRAM_STACK_STATUS_OK;
+}
+
+static void psram_heaps_commit_rebuild_locked(
+	const PsramStackInitPlan_t *stack_plan,
+	BlockLink_t *ordinary_first,
+	uintptr_t ordinary_end)
+{
+	psram_ucHeap = PSRAM_START_ADDRESS;
+	os_memset(&psram_xStart, 0, sizeof(psram_xStart));
+	psram_xStart.pxNextFreeBlock = ordinary_first;
+	psram_pxEnd = (BlockLink_t *)ordinary_end;
+	os_memset(psram_pxEnd, 0, xHeapStructSize);
+	os_memset(ordinary_first, 0, xHeapStructSize);
+#if CONFIG_MEM_DEBUG_OVERFLOW
+	psram_xStart.head_magic_num = MEM_HEAD_WORD_TAG;
+	ordinary_first->head_magic_num = MEM_HEAD_WORD_TAG;
+#endif
+	ordinary_first->xBlockSize =
+		ordinary_end - (uintptr_t)ordinary_first;
+	ordinary_first->pxNextFreeBlock = psram_pxEnd;
+	psram_xFreeBytesRemaining = ordinary_first->xBlockSize;
+	psram_xMinimumEverFreeBytesRemaining = psram_xFreeBytesRemaining;
+#if CONFIG_MEM_DEBUG
+	INIT_LIST_HEAD(&xPsramUsed);
+#endif
+	bk_psram_heap_init_flag_set(true);
+	os_memset(&s_psram_stack_start, 0, sizeof(s_psram_stack_start));
+	s_psram_stack_end = NULL;
+	s_psram_stack_free_bytes = 0U;
+	s_psram_stack_minimum_ever_free_bytes = 0U;
+	psram_stack_commit_init(stack_plan);
+	s_psram_used_count = s_psram_stack_pm_provisional_hold ? 1U : 0U;
+	FIXED_ADDR_PSRAM_USDE_COUNT =
+		s_psram_stack_pm_provisional_hold ? 1U : 0U;
+	__DMB();
+	FIXED_ADDR_PSRAM_POWER_DOWN = 0U;
+}
+
+static int psram_heaps_rebuild_after_power_down_locked(void)
+{
+	PsramStackInitPlan_t stack_plan;
+	BlockLink_t *ordinary_first;
+	uintptr_t ordinary_end;
+	const bool provisional_only =
+		(s_psram_power_inflight == 1U)
+		&& (s_psram_stack_pm_provisional_hold == 1U)
+		&& (s_psram_stack_live_count == 0U)
+		&& (s_psram_stack_pm_hold_generation == 0U)
+		&& (s_psram_used_count == 1U)
+		&& (FIXED_ADDR_PSRAM_USDE_COUNT == 1U);
+	if (FIXED_ADDR_PSRAM_POWER_DOWN != PM_PSRAM_POWER_DOWN_MAGIC) {
+		return PSRAM_STACK_STATUS_OK;
+	}
+	if ((s_psram_stack_pm_provisional_hold
+			|| (s_psram_stack_live_count != 0U)
+			|| (s_psram_stack_pm_hold_generation != 0U)
+			|| (s_psram_used_count != 0U)
+			|| (FIXED_ADDR_PSRAM_USDE_COUNT != 0U))
+		&& !provisional_only) {
+		__DMB();
+		configPSRAM_STACK_FATAL_RESET();
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	if ((psram_ordinary_prepare_rebuild(
+			&ordinary_first, &ordinary_end) != 0)
+		|| (psram_stack_prepare_init(&stack_plan) != 0)) {
+		return PSRAM_STACK_STATUS_CACHE_ERROR;
+	}
+	psram_heaps_commit_rebuild_locked(
+		&stack_plan, ordinary_first, ordinary_end);
+	return PSRAM_STACK_STATUS_OK;
+}
+
+static int psram_stack_allocated_layout_valid(
+	PsramStackBlock_t *block, size_t block_size)
+{
+	const size_t requested_size = psram_stack_requested_size(block);
+	size_t padded_size;
+	size_t required_size;
+
+	if ((block->block.pxNextFreeBlock != NULL)
+		|| !psram_stack_requested_size_storable(requested_size)
+		|| (psram_stack_align_request(requested_size, &padded_size) != 0)
+		|| (padded_size >
+			(SIZE_MAX - PSRAM_STACK_HEADER_SIZE - PSRAM_STACK_GUARD_SIZE))) {
+		return -1;
+	}
+	required_size =
+		PSRAM_STACK_HEADER_SIZE + padded_size + PSRAM_STACK_GUARD_SIZE;
+	if ((block_size < required_size)
+		|| ((block_size - required_size)
+			>= PSRAM_STACK_MINIMUM_BLOCK_SIZE)) {
+		return -1;
+	}
+	return 0;
+}
+
+static int psram_stack_validate_heap_locked(void)
+{
+	uintptr_t heap_start;
+	uintptr_t heap_end;
+	uintptr_t sentinel;
+	uintptr_t cursor;
+	BlockLink_t *expected_free;
+	size_t free_sum = 0U;
+	size_t nodes = 0U;
+	size_t maximum_nodes;
+
+	if ((psram_stack_heap_bounds(&heap_start, &heap_end) != 0)
+		|| (s_psram_stack_end == NULL)
+		|| ((uintptr_t)s_psram_stack_end
+			!= (heap_end - PSRAM_STACK_HEADER_SIZE))
+		|| (((uintptr_t)s_psram_stack_end
+			& PSRAM_STACK_CACHE_LINE_MASK) != 0U)
+		|| (s_psram_stack_start.block.pxNextFreeBlock == NULL)
+		|| (xBlockAllocatedBit
+			!= (((size_t)1U)
+				<< ((sizeof(size_t) * heapBITS_PER_BYTE) - 1U)))) {
+		return -1;
+	}
+	sentinel = (uintptr_t)s_psram_stack_end;
+	if ((psram_stack_metadata_acquire(s_psram_stack_end) != 0)
+		|| (s_psram_stack_end->block.xBlockSize != 0U)
+		|| (s_psram_stack_end->block.pxNextFreeBlock != NULL)) {
+		return -1;
+	}
+
+	expected_free = s_psram_stack_start.block.pxNextFreeBlock;
+	cursor = heap_start;
+	maximum_nodes = (size_t)((sentinel - heap_start)
+		/ PSRAM_STACK_MINIMUM_BLOCK_SIZE) + 1U;
+	while (cursor < sentinel) {
+		PsramStackBlock_t *block = (PsramStackBlock_t *)cursor;
+		const size_t raw_size =
+			(psram_stack_metadata_acquire(block) == 0)
+				? block->block.xBlockSize : 0U;
+		const size_t block_size = raw_size & ~xBlockAllocatedBit;
+		uintptr_t block_end;
+
+		if ((++nodes > maximum_nodes)
+			|| !psram_stack_block_size_valid(
+				block, block_size, sentinel)) {
+			return -1;
+		}
+		block_end = cursor + block_size;
+		if ((raw_size & xBlockAllocatedBit) != 0U) {
+			if ((expected_free != &s_psram_stack_end->block)
+				&& ((uintptr_t)expected_free < block_end)) {
+				return -1;
+			}
+			if (psram_stack_allocated_layout_valid(
+					block, block_size) != 0) {
+				return -1;
+			}
+		} else {
+			BlockLink_t *successor = block->block.pxNextFreeBlock;
+			const uintptr_t successor_address = (uintptr_t)successor;
+
+			if ((expected_free != &block->block)
+				|| (psram_stack_requested_size(block) != 0U)
+				|| (successor == NULL)
+				|| (successor_address <= cursor)
+				|| (successor_address > sentinel)
+				|| ((successor_address
+					& PSRAM_STACK_CACHE_LINE_MASK) != 0U)
+				|| ((block_end == successor_address)
+					&& (successor
+						!= &s_psram_stack_end->block))
+				|| (block_size > (SIZE_MAX - free_sum))) {
+				return -1;
+			}
+			free_sum += block_size;
+			expected_free = successor;
+		}
+		cursor = block_end;
+	}
+	if ((cursor != sentinel)
+		|| (expected_free != &s_psram_stack_end->block)
+		|| (free_sum != s_psram_stack_free_bytes)) {
+		return -1;
+	}
+	return 0;
+}
+
+static int psram_stack_find_free_validated(
+	size_t wanted_size,
+	PsramStackBlock_t **previous_out,
+	PsramStackBlock_t **block_out)
+{
+	PsramStackBlock_t *previous = &s_psram_stack_start;
+	PsramStackBlock_t *block =
+		(PsramStackBlock_t *)previous->block.pxNextFreeBlock;
+
+	while (block != s_psram_stack_end) {
+		if (block->block.xBlockSize >= wanted_size) {
+			*previous_out = previous;
+			*block_out = block;
+			return 0;
+		}
+		previous = block;
+		block = (PsramStackBlock_t *)block->block.pxNextFreeBlock;
+	}
+	return -1;
+}
+
+static int psram_stack_preflight_header(PsramStackBlock_t *block)
+{
+	return psram_stack_metadata_clean(block);
+}
+
+static int psram_stack_preflight_fresh_line(void *address)
+{
+	if (cache_stack_acquire_aligned(
+			address, PSRAM_STACK_CACHE_LINE_SIZE) != 0) {
+		return -1;
+	}
+	return cache_stack_metadata_clean_aligned(
+		address, PSRAM_STACK_CACHE_LINE_SIZE);
+}
+
+static int psram_stack_prevalidate_allocation(
+	PsramStackBlock_t *previous,
+	PsramStackBlock_t *block,
+	size_t padded_size,
+	size_t wanted_size,
+	PsramStackBlock_t **split_out,
+	size_t *allocated_size_out)
+{
+	const size_t original_size = block->block.xBlockSize;
+	PsramStackBlock_t *split = NULL;
+	size_t allocated_size = original_size;
+	uint8_t *guard =
+		(uint8_t *)block + PSRAM_STACK_HEADER_SIZE + padded_size;
+
+	if ((original_size - wanted_size) >= PSRAM_STACK_MINIMUM_BLOCK_SIZE) {
+		split =
+			(PsramStackBlock_t *)((uint8_t *)block + wanted_size);
+		allocated_size = wanted_size;
+	}
+	if ((psram_stack_preflight_header(block) != 0)
+		|| ((previous != &s_psram_stack_start)
+			&& (psram_stack_preflight_header(previous) != 0))
+		|| ((split != NULL)
+			&& (psram_stack_preflight_fresh_line(split) != 0))
+		|| (psram_stack_preflight_fresh_line(guard) != 0)) {
+		return -1;
+	}
+	*split_out = split;
+	*allocated_size_out = allocated_size;
+	return 0;
+}
+
+static int psram_stack_prepare_allocation_locked(
+	size_t wanted_size,
+	size_t padded_size,
+	PsramStackAllocPlan_t *plan)
+{
+	if ((psram_stack_heap_init_locked() != 0)
+		|| (psram_stack_validate_heap_locked() != 0)) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	if ((wanted_size > s_psram_stack_free_bytes)
+		|| (psram_stack_find_free_validated(
+			wanted_size, &plan->previous, &plan->block) != 0)) {
+		return PSRAM_STACK_STATUS_NO_MEMORY;
+	}
+	if (psram_stack_prevalidate_allocation(
+			plan->previous, plan->block, padded_size, wanted_size,
+			&plan->split, &plan->allocated_size) != 0) {
+		return PSRAM_STACK_STATUS_CACHE_ERROR;
+	}
+	return PSRAM_STACK_STATUS_OK;
+}
+
+static void psram_stack_commit_allocation(
+	PsramStackBlock_t *previous,
+	PsramStackBlock_t *block,
+	PsramStackBlock_t *split,
+	size_t allocated_size,
+	size_t requested_size,
+	size_t padded_size)
+{
+	BlockLink_t *next = block->block.pxNextFreeBlock;
+	uint8_t *guard =
+		(uint8_t *)block + PSRAM_STACK_HEADER_SIZE + padded_size;
+
+	if (split != NULL) {
+		os_memset(split, 0, PSRAM_STACK_HEADER_SIZE);
+		split->block.xBlockSize =
+			block->block.xBlockSize - allocated_size;
+		split->block.pxNextFreeBlock = next;
+		previous->block.pxNextFreeBlock = &split->block;
+	} else {
+		previous->block.pxNextFreeBlock = next;
+	}
+	block->block.xBlockSize = allocated_size | xBlockAllocatedBit;
+	block->block.pxNextFreeBlock = NULL;
+	psram_stack_store_requested_size(block, requested_size);
+	os_memset(guard, MEM_OVERFLOW_TAG, PSRAM_STACK_GUARD_SIZE);
+
+	if (split != NULL) {
+		cache_stack_metadata_clean_commit(
+			split, PSRAM_STACK_HEADER_SIZE);
+	}
+	if (previous != &s_psram_stack_start) {
+		cache_stack_metadata_clean_commit(
+			previous, PSRAM_STACK_HEADER_SIZE);
+	}
+	cache_stack_metadata_clean_commit(block, PSRAM_STACK_HEADER_SIZE);
+	cache_stack_metadata_clean_commit(guard, PSRAM_STACK_GUARD_SIZE);
+	s_psram_stack_free_bytes -= allocated_size;
+	if (s_psram_stack_free_bytes
+		< s_psram_stack_minimum_ever_free_bytes) {
+		s_psram_stack_minimum_ever_free_bytes =
+			s_psram_stack_free_bytes;
+	}
+}
+
+static PsramStackBlock_t *psram_stack_find_allocated_validated(void *payload)
+{
+	uintptr_t heap_start;
+	uintptr_t heap_end;
+	uintptr_t cursor;
+	const uintptr_t sentinel = (uintptr_t)s_psram_stack_end;
+
+	if (psram_stack_heap_bounds(&heap_start, &heap_end) != 0) {
+		return NULL;
+	}
+	(void)heap_end;
+	cursor = heap_start;
+	while (cursor < sentinel) {
+		PsramStackBlock_t *block = (PsramStackBlock_t *)cursor;
+		const size_t block_size =
+			block->block.xBlockSize & ~xBlockAllocatedBit;
+
+		if (((uint8_t *)block + PSRAM_STACK_HEADER_SIZE) == payload) {
+			return ((block->block.xBlockSize
+				& xBlockAllocatedBit) != 0U) ? block : NULL;
+		}
+		cursor += block_size;
+	}
+	return NULL;
+}
+
+static int psram_stack_live_span_valid(
+	PsramStackBlock_t *block,
+	void *payload,
+	size_t requested_size)
+{
+	const size_t metadata_size = psram_stack_requested_size(block);
+	const size_t block_size = block->block.xBlockSize & ~xBlockAllocatedBit;
+	size_t padded_size;
+	size_t required_size;
+	size_t ownership_size;
+	void *span_start;
+	size_t span_size;
+	uint8_t *guard;
+
+	if ((metadata_size != requested_size)
+		|| (psram_stack_align_request(requested_size, &padded_size) != 0)
+		|| (padded_size >
+			(SIZE_MAX - PSRAM_STACK_HEADER_SIZE - PSRAM_STACK_GUARD_SIZE))) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	required_size =
+		PSRAM_STACK_HEADER_SIZE + padded_size + PSRAM_STACK_GUARD_SIZE;
+	ownership_size = padded_size + PSRAM_STACK_GUARD_SIZE;
+	if ((psram_stack_owner_span(
+			payload, requested_size, &span_start, &span_size)
+			!= PSRAM_STACK_SPAN_VALID)
+		|| (span_start != payload)
+		|| (span_size != ownership_size)
+		|| (block_size < required_size)
+		|| ((block_size - required_size)
+			>= PSRAM_STACK_MINIMUM_BLOCK_SIZE)) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	guard = (uint8_t *)payload + padded_size;
+	if (cache_stack_acquire_aligned(payload, ownership_size) != 0) {
+		return PSRAM_STACK_STATUS_CACHE_ERROR;
+	}
+	for (size_t index = 0U; index < PSRAM_STACK_GUARD_SIZE; index++) {
+		if (guard[index] != MEM_OVERFLOW_TAG) {
+			return PSRAM_STACK_STATUS_GUARD_ERROR;
+		}
+	}
+	return PSRAM_STACK_STATUS_OK;
+}
+
+static int psram_stack_find_insert_validated(
+	PsramStackBlock_t *block,
+	PsramStackBlock_t **previous_out,
+	PsramStackBlock_t **next_out)
+{
+	PsramStackBlock_t *previous = &s_psram_stack_start;
+	PsramStackBlock_t *next =
+		(PsramStackBlock_t *)previous->block.pxNextFreeBlock;
+
+	while ((next != s_psram_stack_end)
+		&& ((uintptr_t)next < (uintptr_t)block)) {
+		previous = next;
+		next = (PsramStackBlock_t *)next->block.pxNextFreeBlock;
+	}
+	if ((next == NULL) || ((uintptr_t)next <= (uintptr_t)block)) {
+		return -1;
+	}
+	*previous_out = previous;
+	*next_out = next;
+	return 0;
+}
+
+static int psram_stack_prevalidate_free(
+	PsramStackBlock_t *block,
+	PsramStackBlock_t *previous,
+	PsramStackBlock_t *next,
+	size_t block_size,
+	bool *merge_previous_out,
+	bool *merge_next_out)
+{
+	const bool merge_previous =
+		(previous != &s_psram_stack_start)
+		&& (((uint8_t *)previous + previous->block.xBlockSize)
+			== (uint8_t *)block);
+	PsramStackBlock_t *survivor = merge_previous ? previous : block;
+	const size_t survivor_size =
+		merge_previous
+			? previous->block.xBlockSize + block_size : block_size;
+	const bool merge_next =
+		(next != s_psram_stack_end)
+		&& (((uint8_t *)survivor + survivor_size)
+			== (uint8_t *)next);
+
+	if ((psram_stack_preflight_header(survivor) != 0)
+		|| (!merge_previous
+			&& (previous != &s_psram_stack_start)
+			&& (psram_stack_preflight_header(previous) != 0))
+		|| (merge_previous
+			&& (psram_stack_preflight_header(block) != 0))
+		|| (merge_next
+			&& (psram_stack_preflight_header(next) != 0))) {
+		return -1;
+	}
+	*merge_previous_out = merge_previous;
+	*merge_next_out = merge_next;
+	return 0;
+}
+
+static int psram_stack_prepare_free_locked(
+	void *payload,
+	size_t requested_size,
+	PsramStackFreePlan_t *plan)
+{
+	uintptr_t heap_start;
+	uintptr_t heap_end;
+
+	if ((psram_stack_heap_bounds(&heap_start, &heap_end) != 0)
+		|| (psram_stack_validate_heap_locked() != 0)
+		|| ((plan->block =
+			psram_stack_find_allocated_validated(payload)) == NULL)
+		|| ((plan->span_status = psram_stack_live_span_valid(
+			plan->block, payload, requested_size))
+			!= PSRAM_STACK_STATUS_OK)) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	plan->block_size =
+		plan->block->block.xBlockSize & ~xBlockAllocatedBit;
+	if ((psram_stack_find_insert_validated(
+			plan->block, &plan->previous, &plan->next) != 0)
+		|| (plan->block_size > (size_t)((uintptr_t)s_psram_stack_end
+			- heap_start) - s_psram_stack_free_bytes)) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	(void)heap_end;
+	return psram_stack_prevalidate_free(
+		plan->block, plan->previous, plan->next, plan->block_size,
+		&plan->merge_previous, &plan->merge_next);
+}
+
+static int psram_stack_prepare_free_request(
+	void *payload,
+	psram_stack_pm_transition_t *transition)
+{
+	if (transition == NULL) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	transition->kind = PSRAM_STACK_PM_TRANSITION_NONE;
+	transition->generation = 0U;
+	return ((payload != NULL) && psram_stack_address_in_heap(payload))
+		? PSRAM_STACK_STATUS_OK : PSRAM_STACK_STATUS_INVALID;
+}
+
+static bool psram_stack_generation_available_locked(void)
+{
+	const bool available = (s_psram_stack_live_count != 1U)
+		|| (s_psram_stack_pm_hold_generation != 0U)
+		|| (s_psram_stack_pm_generation != UINT64_MAX);
+
+	if (!available) {
+		/* Exhaustion is fatal before mutation; generation zero is never reused. */
+		__DMB();
+		configPSRAM_STACK_FATAL_RESET();
+	}
+	return available;
+}
+
+static void psram_stack_commit_free(
+	PsramStackBlock_t *block,
+	PsramStackBlock_t *previous,
+	PsramStackBlock_t *next,
+	size_t block_size,
+	bool merge_previous,
+	bool merge_next)
+{
+	PsramStackBlock_t *survivor;
+	BlockLink_t *successor;
+	size_t merged_size;
+
+	if (merge_previous) {
+		survivor = previous;
+		merged_size = previous->block.xBlockSize + block_size;
+	} else {
+		survivor = block;
+		merged_size = block_size;
+		previous->block.pxNextFreeBlock = &block->block;
+	}
+	if (merge_next) {
+		merged_size += next->block.xBlockSize;
+		successor = next->block.pxNextFreeBlock;
+	} else {
+		successor = &next->block;
+	}
+	survivor->block.xBlockSize = merged_size;
+	survivor->block.pxNextFreeBlock = successor;
+	psram_stack_store_requested_size(survivor, 0U);
+
+	if (!merge_previous && (previous != &s_psram_stack_start)) {
+		cache_stack_metadata_clean_commit(
+			previous, PSRAM_STACK_HEADER_SIZE);
+	}
+	cache_stack_metadata_clean_commit(survivor, PSRAM_STACK_HEADER_SIZE);
+	if (merge_previous) {
+		cache_stack_metadata_retire_commit(
+			block, PSRAM_STACK_HEADER_SIZE);
+	}
+	if (merge_next) {
+		cache_stack_metadata_retire_commit(
+			next, PSRAM_STACK_HEADER_SIZE);
+	}
+	s_psram_stack_free_bytes += block_size;
+}
+
+static int psram_stack_prepare_alloc_request(
+	size_t requested_size,
+	void **payload,
+	size_t *padded_size,
+	size_t *wanted_size,
+	psram_stack_pm_transition_t *transition)
+{
+	if ((payload == NULL) || (transition == NULL)
+		|| (psram_stack_align_request(
+			requested_size, padded_size) != 0)
+		|| !psram_stack_requested_size_storable(requested_size)
+		|| (*padded_size >
+			(SIZE_MAX - PSRAM_STACK_HEADER_SIZE
+				- PSRAM_STACK_GUARD_SIZE))) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	*payload = NULL;
+	transition->kind = PSRAM_STACK_PM_TRANSITION_NONE;
+	*wanted_size = PSRAM_STACK_HEADER_SIZE
+		+ *padded_size + PSRAM_STACK_GUARD_SIZE;
+	return PSRAM_STACK_STATUS_OK;
+}
+
+static int psram_stack_finish_power_guard_locked(
+	PsramPowerGuardResult_t power_guard,
+	bool *provisional)
+{
+	if (power_guard != PSRAM_POWER_GUARD_LEADER) {
+		return PSRAM_STACK_STATUS_OK;
+	}
+	*provisional = true;
+	HeapExitCritical();
+	const int power_result = bk_pm_module_vote_psram_ctrl(
+		PM_POWER_PSRAM_MODULE_NAME_AS_MEM,
+		PM_POWER_MODULE_STATE_ON);
+	HeapEnterCritical();
+	if (power_result != BK_OK) {
+		psram_stack_release_provisional_locked(*provisional);
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	if (!psram_power_provisional_owned_locked()) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	if (psram_heaps_rebuild_after_power_down_locked()
+		!= PSRAM_STACK_STATUS_OK) {
+		__DMB();
+		configPSRAM_STACK_FATAL_RESET();
+		return PSRAM_STACK_STATUS_CACHE_ERROR;
+	}
+	return PSRAM_STACK_STATUS_OK;
+}
+
+static int psram_stack_commit_allocation_locked(
+	const PsramStackAllocPlan_t *plan,
+	size_t requested_size,
+	size_t padded_size,
+	bool provisional,
+	psram_stack_pm_transition_t *transition)
+{
+	if ((s_psram_stack_live_count == UINT32_MAX)
+		|| (!provisional && ((s_psram_used_count == UINT32_MAX)
+			|| (FIXED_ADDR_PSRAM_USDE_COUNT == UINT32_MAX)))) {
+		__DMB();
+		configPSRAM_STACK_FATAL_RESET();
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	psram_stack_commit_allocation(
+		plan->previous, plan->block, plan->split,
+		plan->allocated_size, requested_size, padded_size);
+	s_psram_stack_live_count++;
+	if (provisional) {
+		s_psram_stack_pm_provisional_hold = 0U;
+		s_psram_power_inflight = 0U;
+	} else {
+		s_psram_used_count++;
+		FIXED_ADDR_PSRAM_USDE_COUNT++;
+	}
+	__DMB();
+	if (s_psram_stack_live_count == 1U) {
+		transition->kind = PSRAM_STACK_PM_TRANSITION_FIRST_LIVE;
+	}
+	return PSRAM_STACK_STATUS_OK;
+}
+
+int psram_stack_alloc_with_transition(size_t requested_size, void **payload,
+	psram_stack_pm_transition_t *transition)
+{
+	PsramStackAllocPlan_t plan = {0};
+	PsramPowerGuardResult_t power_guard;
+	size_t padded_size;
+	size_t wanted_size;
+	bool provisional = false;
+	int prepare_result;
+	int result = PSRAM_STACK_STATUS_INVALID;
+
+	if (psram_stack_prepare_alloc_request(requested_size, payload,
+			&padded_size, &wanted_size, transition) != 0) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	transition->generation = 0U;
+	HeapEnterCritical();
+	power_guard = psram_stack_prepare_power_locked(true);
+	if (power_guard == PSRAM_POWER_GUARD_BUSY) {
+		HeapExitCritical();
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	result = psram_stack_finish_power_guard_locked(
+		power_guard, &provisional);
+	if (result != PSRAM_STACK_STATUS_OK) {
+		HeapExitCritical();
+		return result;
+	}
+	prepare_result = psram_stack_prepare_allocation_locked(wanted_size,
+		padded_size, &plan);
+	if (prepare_result == PSRAM_STACK_STATUS_NO_MEMORY) {
+		psram_stack_release_provisional_locked(provisional);
+		result = prepare_result;
+	} else if (prepare_result == PSRAM_STACK_STATUS_OK) {
+		result = psram_stack_commit_allocation_locked(
+			&plan, requested_size, padded_size, provisional, transition);
+		if (result == PSRAM_STACK_STATUS_OK) {
+			*payload = (uint8_t *)plan.block
+				+ PSRAM_STACK_HEADER_SIZE;
+		}
+	} else {
+		__DMB();
+		configPSRAM_STACK_FATAL_RESET();
+	}
+	HeapExitCritical();
+	return result;
+}
+
+int psram_stack_alloc(
+	size_t requested_size,
+	void **payload)
+{
+	psram_stack_pm_transition_t transition;
+
+	return psram_stack_alloc_with_transition(
+		requested_size, payload, &transition);
+}
+
+int psram_stack_cache_release(
+	const void *pxStack,
+	size_t ulStackSize)
+{
+	void *span_start;
+	size_t span_size;
+	const psram_stack_span_result_t span_result =
+		psram_stack_owner_span(
+			pxStack, ulStackSize, &span_start, &span_size);
+
+	if (span_result == PSRAM_STACK_SPAN_NOT_CACHEABLE) {
+		return PSRAM_STACK_STATUS_OK;
+	}
+	if (span_result != PSRAM_STACK_SPAN_VALID) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	return (cache_stack_release_aligned(span_start, span_size) == 0)
+		? PSRAM_STACK_STATUS_OK : PSRAM_STACK_STATUS_CACHE_ERROR;
+}
+
+int psram_stack_cache_acquire(
+	const void *pxStack,
+	size_t ulStackSize)
+{
+	void *span_start;
+	size_t span_size;
+	const psram_stack_span_result_t span_result =
+		psram_stack_owner_span(
+			pxStack, ulStackSize, &span_start, &span_size);
+
+	if (span_result == PSRAM_STACK_SPAN_NOT_CACHEABLE) {
+		return PSRAM_STACK_STATUS_OK;
+	}
+	if (span_result != PSRAM_STACK_SPAN_VALID) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	return (cache_stack_acquire_aligned(span_start, span_size) == 0)
+		? PSRAM_STACK_STATUS_OK : PSRAM_STACK_STATUS_CACHE_ERROR;
+}
+
+static int psram_stack_commit_free_transition_locked(
+	const PsramStackFreePlan_t *plan,
+	psram_stack_pm_transition_t *transition)
+{
+	psram_stack_commit_free(
+		plan->block, plan->previous, plan->next, plan->block_size,
+		plan->merge_previous, plan->merge_next);
+	if (s_psram_stack_live_count > 1U) {
+		s_psram_stack_live_count--;
+		s_psram_used_count--;
+		FIXED_ADDR_PSRAM_USDE_COUNT--;
+	} else if (s_psram_stack_live_count == 1U) {
+		s_psram_stack_live_count--;
+		if (s_psram_stack_pm_hold_generation != 0U) {
+			s_psram_used_count--;
+			FIXED_ADDR_PSRAM_USDE_COUNT--;
+		} else {
+			s_psram_stack_pm_generation++;
+			s_psram_stack_pm_hold_generation =
+				s_psram_stack_pm_generation;
+			s_psram_stack_pm_hold_claim_generation =
+				s_psram_stack_pm_hold_generation;
+			transition->kind = PSRAM_STACK_PM_TRANSITION_LAST_FREE;
+			transition->generation =
+				s_psram_stack_pm_hold_generation;
+		}
+	}
+	__DMB();
+	return PSRAM_STACK_STATUS_OK;
+}
+
+int psram_stack_free_exact_with_transition(
+	void *pxStack,
+	size_t ulStackSize,
+	psram_stack_pm_transition_t *transition)
+{
+	PsramStackFreePlan_t plan = {
+		.span_status = PSRAM_STACK_STATUS_INVALID,
+	};
+	int result = PSRAM_STACK_STATUS_INVALID;
+
+	if (psram_stack_prepare_free_request(pxStack, transition) != 0) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	HeapEnterCritical();
+	if (psram_stack_inflight_mutation_reject_locked()) {
+		HeapExitCritical();
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	const bool generation_available =
+		psram_stack_generation_available_locked();
+	if ((psram_heaps_rebuild_after_power_down_locked() == 0)
+		&& generation_available
+		&& !(s_psram_stack_live_count == 0U)
+		&& !(s_psram_stack_live_count > s_psram_used_count)
+		&& !(s_psram_stack_live_count
+			> FIXED_ADDR_PSRAM_USDE_COUNT)
+		&& ((s_psram_stack_pm_hold_generation == 0U)
+			|| ((s_psram_stack_live_count < s_psram_used_count)
+				&& (s_psram_stack_live_count
+					< FIXED_ADDR_PSRAM_USDE_COUNT)))
+		&& (psram_stack_prepare_free_locked(
+			pxStack, ulStackSize, &plan) == 0)) {
+		result = psram_stack_commit_free_transition_locked(
+			&plan, transition);
+	} else if ((plan.block != NULL)
+		&& ((plan.span_status == PSRAM_STACK_STATUS_CACHE_ERROR)
+			|| (plan.span_status == PSRAM_STACK_STATUS_GUARD_ERROR))) {
+		result = plan.span_status;
+	}
+	HeapExitCritical();
+	return result;
+}
+
+int psram_stack_free_exact(
+	void *pxStack,
+	size_t ulStackSize)
+{
+	psram_stack_pm_transition_t transition;
+
+	return psram_stack_free_exact_with_transition(
+		pxStack, ulStackSize, &transition);
+}
+
+int psram_stack_pm_hold_release_claim(uint64_t *generation)
+{
+	int result = PSRAM_STACK_STATUS_INVALID;
+
+	if (generation == NULL) {
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	*generation = 0U;
+	HeapEnterCritical();
+	if (!psram_stack_inflight_mutation_reject_locked()
+		&& (psram_heaps_rebuild_after_power_down_locked() == 0)
+		&& (s_psram_stack_live_count == 0U)
+		&& (s_psram_stack_pm_hold_generation != 0U)
+		&& (s_psram_stack_pm_hold_claim_generation == 0U)) {
+		s_psram_stack_pm_hold_claim_generation =
+			s_psram_stack_pm_hold_generation;
+		*generation = s_psram_stack_pm_hold_generation;
+		result = PSRAM_STACK_STATUS_OK;
+	}
+	HeapExitCritical();
+	return result;
+}
+
+int psram_stack_pm_hold_release_commit(uint64_t generation)
+{
+	int result = PSRAM_STACK_STATUS_INVALID;
+
+	HeapEnterCritical();
+	if (psram_stack_inflight_mutation_reject_locked()) {
+		HeapExitCritical();
+		return PSRAM_STACK_STATUS_INVALID;
+	}
+	if ((psram_heaps_rebuild_after_power_down_locked() != 0)
+		|| (generation == 0U)
+		|| (s_psram_stack_pm_hold_generation == 0U)
+		|| (generation != s_psram_stack_pm_hold_generation)
+		|| (generation != s_psram_stack_pm_hold_claim_generation)
+		|| (s_psram_used_count == 0U)
+		|| (FIXED_ADDR_PSRAM_USDE_COUNT == 0U)
+		|| (s_psram_used_count <= s_psram_stack_live_count)
+		|| (FIXED_ADDR_PSRAM_USDE_COUNT
+			<= s_psram_stack_live_count)) {
+		result = PSRAM_STACK_STATUS_INVALID;
+	} else {
+		if (generation == s_psram_stack_pm_hold_generation) {
+			s_psram_used_count--;
+			FIXED_ADDR_PSRAM_USDE_COUNT--;
+			s_psram_stack_pm_hold_generation = 0U;
+			s_psram_stack_pm_hold_claim_generation = 0U;
+			__DMB();
+			result = PSRAM_STACK_STATUS_OK;
+		}
+	}
+	HeapExitCritical();
+	return result;
+}
+
+int psram_stack_pm_hold_release_abort(uint64_t generation)
+{
+	int result = PSRAM_STACK_STATUS_INVALID;
+
+	HeapEnterCritical();
+	if (!psram_stack_inflight_mutation_reject_locked()
+		&& (generation != 0U)
+		&& (generation == s_psram_stack_pm_hold_generation)
+		&& (generation == s_psram_stack_pm_hold_claim_generation)) {
+		s_psram_stack_pm_hold_claim_generation = 0U;
+		__DMB();
+		result = PSRAM_STACK_STATUS_OK;
+	}
+	HeapExitCritical();
+	return result;
+}
+
+int psram_stack_pm_resync_claim(uint64_t *generation)
+{
+	return psram_stack_pm_hold_release_claim(generation);
+}
+
+int psram_stack_pm_resync_commit(uint64_t generation)
+{
+	return psram_stack_pm_hold_release_commit(generation);
+}
+
+int psram_stack_pm_resync_abort(uint64_t generation)
+{
+	return psram_stack_pm_hold_release_abort(generation);
+}
+
+#endif
 
 
 #if CONFIG_MEM_DEBUG_OVERFLOW
@@ -1151,6 +2505,16 @@ void vPortFree( void *pv )
 	if (platform_is_in_interrupt_context() && (arch_is_enter_exception() == 0)) {
 		BK_LOGD(NULL, "free_risk\r\n");
 		BK_ASSERT(false);
+	}
+#endif
+
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+	if (psram_stack_address_in_heap(pv)) {
+#if CONFIG_MALLOC_STATIS || CONFIG_MEM_DEBUG
+		return NULL;
+#else
+		return;
+#endif
 	}
 #endif
 

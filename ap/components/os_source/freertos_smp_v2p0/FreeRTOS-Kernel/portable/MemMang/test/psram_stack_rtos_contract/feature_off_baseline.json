@@ -1,0 +1,15 @@
+{
+  "additions:xTaskCreateInPsram": "bc70a8696a9485beb7b9b3156e16cb0d868521f02948eb39aeb4aa8328737e5b",
+  "additions:xTaskCreatePinnedToCore": "b34fefb114a676d415e22fb923604f0b46afb6f30e184e1a3f56854637152170",
+  "additions:xTaskCreateStaticPinnedToCore": "232dc88a55fc10317a37e14ad404e5ff98c10a3f11e0c1ef033a55ee213ed3ab",
+  "additions:xTaskCreate_ex": "264d12760d54f59dadac6e7ed1a4c5f469bb9906d7a71633f10ebbd5a415a0ce",
+  "freertos_header:StaticTask": "5bcb1f5d3a64f07cb832628780260c79d2e5d1d2f60b1e727d68eb59ff98a0b3",
+  "mpu:mpu_regions": "d03a0d3d625a4a17e283301ccf131b3cddcdfab90f6c72a75f6154f7e1ff8398",
+  "port:vPortSVCHandler_C": "671b7a4ef67616338ba279b3d2a00c1238470a94f53613d30bd36d8a26600237",
+  "rtos_pub:rtos_create_thread": "87a0f630075209015e613f387fca876d4b28353d894b89425a2523a8177a98e1",
+  "rtos_pub:rtos_create_thread_static": "3da7911fe55c75c6bc3b351c082ee8a4931d400c7e03c3658b7748dbe714f5b5",
+  "rtos_pub:rtos_smp_create_thread": "dc9ddeb88e1d1b66282c70be27b5659f6c94b46be4ee8d6ae0a0481389bc62ba",
+  "tasks:TCB": "9d984c7611a62ce68e3aa9af35f5a61343b3260d953c231b0f5b3265131e93d3",
+  "tasks:prvDeleteTCB": "a48be55b4ac305a6ee62fc98d3ae1176b03ab165a9ccc2b83107795a0b0656e1",
+  "tasks:vTaskSwitchContext": "eda7cece44edc11de27a61c91d777185b6a2a65858d384ad8c065e5165acbd90"
+}

@@ -56,6 +56,9 @@
 
 #include "freertos_additions.h"
 
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+extern void vTaskCacheAcquireFirstStack( void );
+#endif
 
 #undef MPU_WRAPPERS_INCLUDED_FROM_API_FILE
 
@@ -804,6 +807,10 @@ void vPortSVCHandler_C( uint32_t * pulCallerStackAddress ) /* PRIVILEGED_FUNCTIO
                     prvSetupFPU();
                 }
             #endif /* configENABLE_FPU */
+
+            #if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+                vTaskCacheAcquireFirstStack();
+            #endif
 
             /* Setup the context of the first task so that the first task starts
              * executing. */
