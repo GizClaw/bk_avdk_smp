@@ -132,9 +132,8 @@ int main(void)
     fih_int fih_rc = FIH_FAILURE;
     enum tfm_plat_err_t plat_err;
 
-
     bk_efuse_init();
-#if CONFIG_BL2_SECURE_DEBUG
+#if 1//CONFIG_BL2_SECURE_DEBUG
     extern void hal_secure_debug(void);
     hal_secure_debug(); 
 #endif
