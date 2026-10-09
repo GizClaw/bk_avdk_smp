@@ -19,6 +19,8 @@
 #include "dl_protocol.h"
 #include "driver/wdt.h"
 #include "bk_private/bk_wdt.h"
+#include "sys_driver.h"
+#include "sys_ctrl.h"
 
 #define RX_CMD_BUFF_SIZE		(4200)
 enum
@@ -496,6 +498,15 @@ static u32 cmd_reg_read_handler(u8 * cmd_param, u16 param_len)
 	if ((reg_index >= 0) && (reg_index < ANA_XVR_NUM))
 	{
 		reg_data = XVR_ANALOG_REG_BAK[reg_index];
+	}
+	else if ((reg_addr == SCTRL_CHIP_ID) || (reg_addr == SCTRL_BASE))
+	{
+		/* BKFIL uses legacy SCTRL address; MPU does not map 0x00800000 on BK7258. */
+		reg_data = sys_drv_get_chip_id();
+	}
+	else if (reg_addr == SCTRL_DEVICE_ID)
+	{
+		reg_data = sys_drv_get_device_id();
 	}
 	else
 	{
