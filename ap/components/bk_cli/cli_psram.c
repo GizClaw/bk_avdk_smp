@@ -1247,6 +1247,32 @@ static void cli_psram_cmd_handle_ext(char *pcWriteBuffer, int xWriteBufferLen, i
 		psram_stack_stress_stop();
 		msg = CLI_CMD_RSP_SUCCEED;
 	}
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK_PROFILE) && CONFIG_CACHEABLE_PSRAM_TASK_STACK_PROFILE
+	else if (os_strcmp(argv[1], "stack_profile") == 0)
+	{
+		extern void vPsramStackProfileReset(void);
+		extern void vPsramStackProfileGet(uint32_t *, uint32_t *, uint64_t *,
+			uint32_t *, uint32_t *, uint64_t *);
+		uint32_t rel_cnt, rel_max, acq_cnt, acq_max;
+		uint64_t rel_total, acq_total;
+
+		if ((argc >= 3) && (os_strcmp(argv[2], "reset") == 0)) {
+			vPsramStackProfileReset();
+			CLI_LOGD("stack_profile reset\r\n");
+			msg = CLI_CMD_RSP_SUCCEED;
+			goto out;
+		}
+		vPsramStackProfileGet(&rel_cnt, &rel_max, &rel_total,
+			&acq_cnt, &acq_max, &acq_total);
+		CLI_LOGD("stack_profile release: count=%u max=%u avg=%u cycles\r\n",
+			rel_cnt, rel_max,
+			(uint32_t)(rel_cnt ? (rel_total / rel_cnt) : 0));
+		CLI_LOGD("stack_profile acquire: count=%u max=%u avg=%u cycles\r\n",
+			acq_cnt, acq_max,
+			(uint32_t)(acq_cnt ? (acq_total / acq_cnt) : 0));
+		msg = CLI_CMD_RSP_SUCCEED;
+	}
+#endif
 	else if (os_strcmp(argv[1], "psram_soak_start") == 0)
 	{
 		extern void psram_soak_start(uint32_t soak_ms);
@@ -1408,10 +1434,19 @@ void psram_cdv_stop(void)
 #define STACK_STRESS_WORKER_STACK   (16 * 1024)
 #define STACK_STRESS_PARENT_STACK   (16 * 1024)
 
+/* Sampling period between migration checks. Short enough that the worker is
+ * rescheduled often, long enough that ten workers do not starve the system. */
+#define STACK_STRESS_STEP_MS        2
+
 typedef struct {
 	volatile uint8_t running;
 	volatile uint32_t error_count;
 	volatile uint32_t completed_rounds;
+	/* Cross-core migrations actually observed by the workers, not context
+	 * switches: only a change of running core exercises the publish/acquire
+	 * pair this scheme has to get right. */
+	volatile uint32_t migrations;
+	volatile uint32_t verified_migrations;
 	volatile uint8_t worker_done[STACK_STRESS_WORKER_CNT];
 	beken_thread_t parent_hdl;
 } stack_stress_ctx_t;
@@ -1425,6 +1460,8 @@ static void stack_stress_worker(void *arg)
 	uint32_t worker_id = packed >> 8;
 	uint8_t buf_a[STACK_STRESS_LOCAL_BUF_SZ];
 	uint8_t buf_b[STACK_STRESS_LOCAL_BUF_SZ];
+	int last_core = rtos_get_core_id();
+	uint8_t key = 0;
 
 	for (uint32_t i = 0; i < STACK_STRESS_LOCAL_BUF_SZ; i++)
 		buf_a[i] = (uint8_t)(i + worker_id * 37 + 0x5A);
@@ -1443,8 +1480,38 @@ static void stack_stress_worker(void *arg)
 	if (slot_id < STACK_STRESS_WORKER_CNT)
 		s_ss_ctx.worker_done[slot_id] = 1;
 
-	while (1)
-		rtos_delay_milliseconds(1000);
+	/* The parent owns worker lifetime and deletes these threads, so never
+	 * self-exit here. */
+	while (1) {
+		int core;
+
+		/* Rewrite the stack-resident buffer on the current core, then check it
+		 * back only after the task has actually moved cores. */
+		key++;
+		for (uint32_t i = 0; i < STACK_STRESS_LOCAL_BUF_SZ; i++)
+			buf_b[i] = (uint8_t)(buf_a[i] ^ key);
+
+		rtos_delay_milliseconds(STACK_STRESS_STEP_MS);
+
+		core = rtos_get_core_id();
+		if (core == last_core)
+			continue;
+		last_core = core;
+		__atomic_fetch_add(&s_ss_ctx.migrations, 1, __ATOMIC_RELAXED);
+
+		for (uint32_t i = 0; i < STACK_STRESS_LOCAL_BUF_SZ; i++) {
+			uint8_t expect_a = (uint8_t)(i + worker_id * 37 + 0x5A);
+
+			if ((buf_a[i] != expect_a)
+				|| (buf_b[i] != (uint8_t)(expect_a ^ key))) {
+				s_ss_ctx.error_count++;
+				CLI_LOGE("worker%u: post-migration mismatch @%u core=%d: a=%02x b=%02x key=%02x\r\n",
+					worker_id, i, core, buf_a[i], buf_b[i], key);
+				break;
+			}
+		}
+		__atomic_fetch_add(&s_ss_ctx.verified_migrations, 1, __ATOMIC_RELAXED);
+	}
 }
 
 static uint32_t ss_simple_rand(uint32_t *seed)
@@ -1564,16 +1631,18 @@ static void stack_stress_parent(void *arg)
 
 		uint64_t now = bk_get_current_timer();
 		if (now - last_status_time >= 5000000) {
-			CLI_LOGD("stack_stress running [%08x-%08x]: rounds=%u, errors=%u\r\n",
+			CLI_LOGD("stack_stress running [%08x-%08x]: rounds=%u, migrations=%u, verified=%u, errors=%u\r\n",
 				CONFIG_PSRAM_TEST_TASK_ADDR,
 				CONFIG_PSRAM_TEST_TASK_ADDR + CONFIG_PSRAM_TEST_TASK_SIZE,
-				s_ss_ctx.completed_rounds, s_ss_ctx.error_count);
+				s_ss_ctx.completed_rounds, s_ss_ctx.migrations,
+				s_ss_ctx.verified_migrations, s_ss_ctx.error_count);
 			last_status_time = now;
 		}
 	}
 
-	CLI_LOGD("stack_stress stopped: rounds=%u, errors=%u\r\n",
-		s_ss_ctx.completed_rounds, s_ss_ctx.error_count);
+	CLI_LOGD("stack_stress stopped: rounds=%u, migrations=%u, verified=%u, errors=%u\r\n",
+		s_ss_ctx.completed_rounds, s_ss_ctx.migrations,
+		s_ss_ctx.verified_migrations, s_ss_ctx.error_count);
 	s_ss_ctx.parent_hdl = NULL;
 	rtos_delete_thread(NULL);
 }
