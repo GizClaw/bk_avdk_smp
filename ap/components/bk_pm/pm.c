@@ -475,17 +475,35 @@ bk_err_t bk_pm_module_vote_sleep_ctrl(pm_sleep_module_name_e module, uint32_t sl
 	{
 		return BK_OK;
 	}
+		if(module == PM_SLEEP_MODULE_NAME_PSRAM)
+		{
+			if(sleep_time != 0U)
+			{
+				return BK_FAIL;
+			}
+			return bk_pm_psram_stack_vote_sleep_ctrl(sleep_state);
+		}
 	uint32_t flag = rtos_enter_critical();
-	FIXED_ADDR_PM_AP_SLEEP_VOTE |= (0x1ULL << module);
+		const bool vote_set = pm_shared_u64_bit_set(
+			&FIXED_ADDR_PM_AP_SLEEP_VOTE, (uint32_t)module);
 	rtos_exit_critical(flag);
+		if (!vote_set)
+		{
+			return BK_FAIL;
+		}
 	bk_pm_cp1_sleep_ctrl_state_set(PM_MAILBOX_COMMUNICATION_INIT);
 
     ret = pm_cp1_mailbox_send_data(PM_SLEEP_CTRL_CMD, module,sleep_state,sleep_time);
     if(ret != BK_OK)
     {
 		flag = rtos_enter_critical();
-		FIXED_ADDR_PM_AP_SLEEP_VOTE &= ~(0x1ULL << module);
+			const bool vote_cleared = pm_shared_u64_bit_clear(
+				&FIXED_ADDR_PM_AP_SLEEP_VOTE, (uint32_t)module);
 		rtos_exit_critical(flag);
+			if (!vote_cleared)
+			{
+				return BK_FAIL;
+			}
         return BK_FAIL;
     }
 
@@ -506,8 +524,13 @@ bk_err_t bk_pm_module_vote_sleep_ctrl(pm_sleep_module_name_e module, uint32_t sl
 	}
 
 	flag = rtos_enter_critical();
-	FIXED_ADDR_PM_AP_SLEEP_VOTE &= ~(0x1ULL << module);
+		const bool vote_cleared = pm_shared_u64_bit_clear(
+			&FIXED_ADDR_PM_AP_SLEEP_VOTE, (uint32_t)module);
 	rtos_exit_critical(flag);
+		if (!vote_cleared)
+		{
+			return BK_FAIL;
+		}
 #endif
 	return BK_OK;
 
@@ -1394,8 +1417,13 @@ bk_err_t bk_pm_clock_ctrl(pm_dev_clk_e module, pm_dev_clk_pwr_e clock_state)
     int ret                 = 0;
 
 	int32_t flag = rtos_enter_critical();
-	FIXED_ADDR_PM_AP_CLK_VOTE_STATE |= (1 << module);
+	const bool vote_set = pm_shared_u64_bit_set(
+		&FIXED_ADDR_PM_AP_CLK_VOTE_STATE, (uint32_t)module);
 	rtos_exit_critical(flag);
+	if (!vote_set)
+	{
+		return BK_FAIL;
+	}
 
 	bk_pm_cp1_clk_ctrl_state_set(PM_MAILBOX_COMMUNICATION_INIT);
 
@@ -1403,8 +1431,13 @@ bk_err_t bk_pm_clock_ctrl(pm_dev_clk_e module, pm_dev_clk_pwr_e clock_state)
     if(ret != BK_OK)
     {
 		flag = rtos_enter_critical();
-		FIXED_ADDR_PM_AP_CLK_VOTE_STATE &= ~(1 << module);
+		const bool vote_cleared = pm_shared_u64_bit_clear(
+			&FIXED_ADDR_PM_AP_CLK_VOTE_STATE, (uint32_t)module);
 		rtos_exit_critical(flag);
+		if (!vote_cleared)
+		{
+			return BK_FAIL;
+		}
         return BK_FAIL;
     }
 	previous_tick = pm_cp1_aon_rtc_counter_get();
@@ -1423,8 +1456,13 @@ bk_err_t bk_pm_clock_ctrl(pm_dev_clk_e module, pm_dev_clk_pwr_e clock_state)
 	    BK_LOGD(NULL, "cp1 vote freq[%d] time out\r\n",module);
 	}
 	flag = rtos_enter_critical();
-	FIXED_ADDR_PM_AP_CLK_VOTE_STATE &= ~(1 << module);
+	const bool vote_cleared = pm_shared_u64_bit_clear(
+		&FIXED_ADDR_PM_AP_CLK_VOTE_STATE, (uint32_t)module);
 	rtos_exit_critical(flag);
+	if (!vote_cleared)
+	{
+		return BK_FAIL;
+	}
 #endif
 	return BK_OK;
 

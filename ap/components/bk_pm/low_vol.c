@@ -30,21 +30,25 @@
 /*================FUNCTION DECLARATION  SECTION  END===============*/
 uint64_t bk_pm_module_lv_sleep_state_get(pm_dev_id_e module)
 {
-	return FIXED_ADDR_PM_MODULE_LV_SLEEP_STATE & (0x1ULL << module);
+	return pm_shared_u64_bit_get(
+		&FIXED_ADDR_PM_MODULE_LV_SLEEP_STATE, (uint32_t)module);
 }
 __attribute__((section(".itcm_sec_code"))) bk_err_t bk_pm_module_lv_sleep_state_set()
 {
-	FIXED_ADDR_PM_MODULE_LV_SLEEP_STATE = 0xFFFFFFFFFFFFFFFF;
-	return BK_OK;
+	return pm_shared_u64_store(
+		&FIXED_ADDR_PM_MODULE_LV_SLEEP_STATE, UINT64_MAX)
+		? BK_OK : BK_FAIL;
 }
 bk_err_t bk_pm_module_lv_sleep_state_clear(pm_dev_id_e module)
 {
-	FIXED_ADDR_PM_MODULE_LV_SLEEP_STATE &= ~(0x1ULL << module);
-	return BK_OK;
+	return pm_shared_u64_bit_clear(
+		&FIXED_ADDR_PM_MODULE_LV_SLEEP_STATE, (uint32_t)module)
+		? BK_OK : BK_FAIL;
 }
 
 bk_err_t pm_debug_lv_state()
 {
-	BK_LOGD(NULL, "pm_module_lv_sleep_state:0x%llx\r\n",FIXED_ADDR_PM_MODULE_LV_SLEEP_STATE);
+	BK_LOGD(NULL, "pm_module_lv_sleep_state:0x%llx\r\n",
+		pm_shared_u64_load(&FIXED_ADDR_PM_MODULE_LV_SLEEP_STATE));
 	return BK_OK;
 }
