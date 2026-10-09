@@ -31,6 +31,7 @@ static void cli_mbedtls_help(void)
 	CLI_LOGD("mbedtls_rsa\r\n");
 	CLI_LOGD("mbedtls_selftest\r\n");
 	CLI_LOGD("mbedtls_thread create [cnt]\r\n");
+	CLI_LOGD("mbedtls_key_ladder model/device/all\r\n");
 }
 
 #define err_if(expr,status)                                          \
@@ -207,6 +208,48 @@ static void cli_mbedtls_thread(char *pcWriteBuffer, int xWriteBufferLen, int arg
 	}
 }
 
+static void cli_mbedtls_key_ladder_cmd(char *pcWriteBuffer, int xWriteBufferLen, int argc, char **argv)
+{
+	if (argc < 2) {
+		cli_mbedtls_help();
+		return;
+	}
+
+	uint32_t err_cnt = 0;
+	int ret = 0;
+
+	bk_pm_module_vote_cpu_freq(PM_DEV_ID_SECURE_WORLD, MBEDTLS_TEST_FREQUENCY);
+
+	if (os_strcmp(argv[1], "model") == 0) {
+		ret = te200_key_ladder_gcm_test(0);
+		err_if(ret != 0, ret);
+	}
+	else if (os_strcmp(argv[1], "device") == 0) {
+		ret = te200_key_ladder_gcm_test(1);
+		err_if(ret != 0, ret);
+	}
+	else if (os_strcmp(argv[1], "all") == 0) {
+		ret = te200_key_ladder_gcm_test(0);
+		err_if(ret != 0, ret);
+
+		ret = te200_key_ladder_gcm_test(1);
+		err_if(ret != 0, ret);
+
+		ret = te200_key_ladder_root_diff_test();
+		err_if(ret != 0, ret);
+	}
+	else {
+		cli_mbedtls_help();
+	}
+
+	if (0 == err_cnt)
+		CLI_LOGD("passed\r\n");
+	else
+		CLI_LOGE("failed\r\n");
+
+	bk_pm_module_vote_cpu_freq(PM_DEV_ID_SECURE_WORLD, PM_CPU_FRQ_DEFAULT);
+}
+
 #define MBEDTLS_CMD_CNT (sizeof(s_mbedtls_commands) / sizeof(struct cli_command))
 static const struct cli_command s_mbedtls_commands[] = {
 	{"mbedtls_sha",      "mbedtls_sha {256|512}",         cli_mbedtls_sha_cmd},
@@ -215,6 +258,7 @@ static const struct cli_command s_mbedtls_commands[] = {
 	{"mbedtls_rsa",      "mbedtls_rsa",                   cli_mbedtls_rsa_cmd},
 	{"mbedtls_selftest", "mbedtls_selftest",              cli_mbedtls_selftest},
 	{"mbedtls_thread",   "mbedtls_thread {create}{count}",cli_mbedtls_thread},
+	{"mbedtls_key_ladder", "mbedtls_key_ladder {model|device|all}", cli_mbedtls_key_ladder_cmd},
 };
 
 int cli_mbedtls_init(void)

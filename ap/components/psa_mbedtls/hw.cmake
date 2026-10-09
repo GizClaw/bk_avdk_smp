@@ -24,6 +24,7 @@ if (CONFIG_TRUSTENGINE)
 
 	list(APPEND hw_srcs
 		${TE_DIR}/spe/src/misc.c
+		${TE_DIR}/key_ladder_gcm.c
 
 		${TE_DIR}/dubhe_alt/src/aes.c
 		${TE_DIR}/dubhe_alt/src/bignum_wrap.c

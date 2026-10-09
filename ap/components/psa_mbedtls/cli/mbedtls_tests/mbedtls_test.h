@@ -22,3 +22,6 @@ int te200_aes_ctr_test(void);
 int te200_ecdsa_self_test( int verbose ,uint32_t loop);
 int te200_rsa_self_test( int verbose );
 void te200_muti_task_test( void *para );
+/* root_sel: 0 for model key, 1 for device root key */
+int te200_key_ladder_gcm_test(int root_sel);
+int te200_key_ladder_root_diff_test(void);
