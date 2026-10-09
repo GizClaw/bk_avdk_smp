@@ -464,7 +464,7 @@ static void can_20_stb_demo2_send_random_data(can_20_stb_demo *demo2)
 			break;
 	}
 
-	frame.tag.fdf = CAN_PROTO_20;
+	frame.tag.fdf = CAN_PROTO_CLASSIC;
 	frame.tag.id = demo2->can_id;
 	frame.tag.rtr = 0;
 	frame.tag.ide = 0;

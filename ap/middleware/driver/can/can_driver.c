@@ -276,11 +276,11 @@ bk_err_t bk_can_receive(uint8_t *data, uint32_t expect_size, uint32_t *recv_size
 bk_err_t bk_can_send_ptb(can_frame_s* frame)
 {
     CAN_RETURN_ON_DEVICE_NOT_INIT();
-    if ((frame->tag.fdf == CAN_PROTO_20) && (frame->size > 8)) {
+    if ((frame->tag.fdf == CAN_PROTO_CLASSIC) && (frame->size > 8)) {
         return BK_ERR_PARAM;
     }
 
-    if ((frame->tag.fdf == CAN_PROTO_20) && (frame->tag.brs == CAN_BIT_RATE_FAST)) {
+    if ((frame->tag.fdf == CAN_PROTO_CLASSIC) && (frame->tag.brs == CAN_BIT_RATE_FAST)) {
         return BK_ERR_PARAM;
     }
 

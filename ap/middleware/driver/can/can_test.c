@@ -85,7 +85,7 @@ static void cli_can_send(void *param)
 	for (i = 0; i < ex_size; i++) {
 		demo_send_buf[i] = 0xbb;
 	}
-	frame.tag.fdf = CAN_PROTO_20;
+	frame.tag.fdf = CAN_PROTO_CLASSIC;
 	frame.tag.id = cli_can_id;
 	frame.tag.rtr = 0;
 	frame.tag.ide = 1;
