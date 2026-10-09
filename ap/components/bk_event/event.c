@@ -561,8 +561,8 @@ bk_err_t bk_event_deinit(void)
 bk_err_t bk_event_register_cb(event_module_t event_module_id, int event_id,
 							  event_cb_t event_cb, void *event_cb_arg)
 {
-	event_msg_t msg = {0};
-	event_msg_t *pmsg = &msg;
+	event_msg_t *pmsg;
+	bk_err_t ret;
 
 	if (!event_is_inited()) {
 		EVENT_LOGE("event not init\n");
@@ -571,6 +571,15 @@ bk_err_t bk_event_register_cb(event_module_t event_module_id, int event_id,
 
 	if (event_is_invalid(event_module_id, event_id))
 		return BK_ERR_EVENT_MOD_OR_ID;
+
+	/* The sync message is read by event_task, which may run on the other AP
+	 * core. Allocate it from the non-cacheable (coherent) heap instead of the
+	 * caller's cacheable PSRAM task stack, otherwise event_task can observe a
+	 * stale sync_msg_sem and assert inside xQueueGenericSend(). Ownership is
+	 * the same as the async post path: the producer allocates and frees. */
+	pmsg = os_zalloc(sizeof(event_msg_t));
+	if (!pmsg)
+		return BK_ERR_NO_MEM;
 
 	EVENT_LOGV("register event <%d %d %p %p>\n", event_module_id, event_id,
 			event_cb, event_cb_arg);
@@ -582,14 +591,16 @@ bk_err_t bk_event_register_cb(event_module_t event_module_id, int event_id,
 	pmsg->msg.register_info.event_cb = event_cb;
 	pmsg->msg.register_info.event_cb_arg = event_cb_arg;
 
-	return event_send_msg_to_event_task(pmsg, BEKEN_WAIT_FOREVER);
+	ret = event_send_msg_to_event_task(pmsg, BEKEN_WAIT_FOREVER);
+	os_free(pmsg);
+	return ret;
 }
 
 bk_err_t bk_event_unregister_cb(event_module_t event_module_id, int event_id,
 								event_cb_t event_cb)
 {
-	event_msg_t msg = {0};
-	event_msg_t *pmsg = &msg;
+	event_msg_t *pmsg;
+	bk_err_t ret;
 
 	if (!event_is_inited()) {
 		EVENT_LOGE("unregister fail, event not init\n");
@@ -599,6 +610,11 @@ bk_err_t bk_event_unregister_cb(event_module_t event_module_id, int event_id,
 	if (event_is_invalid(event_module_id, event_id))
 		return BK_ERR_EVENT_MOD_OR_ID;
 
+	/* Coherent sync message, see bk_event_register_cb() for the rationale. */
+	pmsg = os_zalloc(sizeof(event_msg_t));
+	if (!pmsg)
+		return BK_ERR_NO_MEM;
+
 	pmsg->msg_type = EVENT_MSG_UNREGISTER;
 	pmsg->msg.register_info.event_module_id = event_module_id;
 	pmsg->msg.register_info.event_id = event_id;
@@ -607,7 +623,9 @@ bk_err_t bk_event_unregister_cb(event_module_t event_module_id, int event_id,
 	pmsg->sync_msg_ret = BK_OK;
 
 	EVENT_LOGV("unregister event <%d, %d, %p>\n", event_module_id, event_id, event_cb);
-	return event_send_msg_to_event_task(pmsg, BEKEN_WAIT_FOREVER);
+	ret = event_send_msg_to_event_task(pmsg, BEKEN_WAIT_FOREVER);
+	os_free(pmsg);
+	return ret;
 }
 
 bk_err_t bk_event_post(event_module_t event_module_id, int event_id,
