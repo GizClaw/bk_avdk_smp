@@ -80,6 +80,7 @@ typedef enum candidate_slot
 
 #define  RECORD_REBOOT_LIMIT_TIME   (AB_TRY_MAX_DEFAULT)
 #define  WDT_PERIOD_MAX_VALUE       (0xFFFF)//WDT_PERIOD_MAX_VALUE is 0xFFFF
+#define  BOOT_IMAGE_VALIDATE_MAX_ATTEMPTS  2
 
 extern void update_wdt(uint32_t val);
 
@@ -537,8 +538,14 @@ boot_image_check(struct boot_loader_state *state, struct image_header *hdr,
     }
 #endif
 
-    FIH_CALL(bootutil_img_validate, fih_rc, BOOT_CURR_ENC(state), image_index,
-             hdr, fap, tmpbuf, BOOT_TMPBUF_SZ, NULL, 0, NULL);
+    /* Retry once on validation failure. */
+    for (uint8_t attempt = 0; attempt < BOOT_IMAGE_VALIDATE_MAX_ATTEMPTS; attempt++) {
+        FIH_CALL(bootutil_img_validate, fih_rc, BOOT_CURR_ENC(state), image_index,
+                 hdr, fap, tmpbuf, BOOT_TMPBUF_SZ, NULL, 0, NULL);
+        if (fih_eq(fih_rc, FIH_SUCCESS)) {
+            break;
+        }
+    }
     FIH_RET(fih_rc);
 }
 
