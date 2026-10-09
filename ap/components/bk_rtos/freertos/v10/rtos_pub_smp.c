@@ -202,6 +202,36 @@ static bk_err_t rtos_create_noncache_psram_thread(
 	}
 	return kGeneralErr;
 }
+
+/* The cacheable stack allocator is transactional and votes on PSRAM power, so
+ * it only works from task context with the scheduler running; xTaskCreateInPsram()
+ * rejects every other caller outright. Probe the context here instead of reacting
+ * to its return code, so a genuinely exhausted stack heap still surfaces as an
+ * error rather than silently degrading to a non-cacheable stack. */
+static bool rtos_cacheable_psram_stack_usable(void)
+{
+	return s_is_started_scheduler
+		&& (0 == platform_is_in_interrupt_context())
+		&& (0 == platform_local_irq_disabled());
+}
+
+/* Default PSRAM task-stack placement. Every stack created once the scheduler is
+ * up is cacheable; only the boot-time tasks created before rtos_start_scheduler()
+ * stay on the non-cacheable PSRAM heap, which is coherent by construction and
+ * therefore safe - the cacheable heap simply cannot serve them yet. */
+static bk_err_t rtos_create_default_psram_thread(
+	beken_thread_t *thread,
+	uint8_t priority,
+	const char *name,
+	beken_thread_function_t function,
+	uint32_t stack_size,
+	beken_thread_arg_t arg)
+{
+	if (rtos_cacheable_psram_stack_usable()) {
+		return rtos_create_psram_thread(thread, priority, name, function, stack_size, arg);
+	}
+	return rtos_create_noncache_psram_thread(thread, priority, name, function, stack_size, arg);
+}
 #endif
 
 // create task and set affinity to cpu0
@@ -210,7 +240,7 @@ bk_err_t rtos_create_thread( beken_thread_t* thread, uint8_t priority, const cha
 {
 #if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
 #if CONFIG_TASK_STACK_IN_PSRAM && CONFIG_PSRAM_AS_SYS_MEMORY
-    return rtos_create_noncache_psram_thread(thread, priority, name, function, stack_size, arg);
+    return rtos_create_default_psram_thread(thread, priority, name, function, stack_size, arg);
 #else
     return rtos_create_thread_with_affinity(thread, tskNO_AFFINITY, priority, name, function, stack_size, arg);
 #endif
@@ -260,7 +290,7 @@ bk_err_t rtos_smp_create_thread( beken_thread_t* thread, uint8_t priority, const
 {
 #if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
 #if CONFIG_TASK_STACK_IN_PSRAM && CONFIG_PSRAM_AS_SYS_MEMORY
-    return rtos_create_noncache_psram_thread(thread, priority, name, function, stack_size, arg);
+    return rtos_create_default_psram_thread(thread, priority, name, function, stack_size, arg);
 #else
     return rtos_create_thread_with_affinity(thread, tskNO_AFFINITY, priority, name, function, stack_size, arg);
 #endif
