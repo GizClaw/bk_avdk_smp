@@ -139,6 +139,8 @@ __attribute__((section(".itcm_sec_code"))) static void lcd_driver_display_rgb_is
             lcd_disp_config->pingpong_frame = NULL;
             lcd_disp_config->pingpong_frame_cb = NULL;
             lcd_driver_set_display_base_addr((uint32_t)lcd_disp_config->display_frame->frame);
+            display_exit_critical(flag);
+
             if (temp_buffer != NULL)
             {
                 ret = lcd_display_task_send_msg(lcd_disp_config, DISPLAY_FRAME_FREE, (uint32_t)temp_buffer, (uint32_t)temp_cb);
@@ -150,7 +152,6 @@ __attribute__((section(".itcm_sec_code"))) static void lcd_driver_display_rgb_is
                     }
                 }
             }
-            display_exit_critical(flag);
             rtos_set_semaphore(&lcd_disp_config->disp_sem);
         }
         else
@@ -188,20 +189,24 @@ static bk_err_t lcd_display_frame(private_display_rgb_context_t *lcd_disp_config
     }
     else
     {
+        frame_buffer_t *old_frame = NULL;
+        flush_complete_t old_cb = NULL;
         uint32_t flag = 0;
+
         flag = display_enter_critical();
         if (lcd_disp_config->pingpong_frame != NULL)
         {
-            if (lcd_disp_config->pingpong_frame_cb != NULL)
-            {
-                lcd_disp_config->pingpong_frame_cb(lcd_disp_config->pingpong_frame);
-            }
-            lcd_disp_config->pingpong_frame = NULL;
+            old_frame = lcd_disp_config->pingpong_frame;
+            old_cb = lcd_disp_config->pingpong_frame_cb;
         }
-        display_exit_critical(flag);
-
         lcd_disp_config->pingpong_frame = frame;
         lcd_disp_config->pingpong_frame_cb = cb;
+        display_exit_critical(flag);
+
+        if (old_frame != NULL && old_cb != NULL)
+        {
+            old_cb(old_frame);
+        }
     }
 
     ret = rtos_get_semaphore(&lcd_disp_config->disp_sem, BEKEN_NEVER_TIMEOUT);
