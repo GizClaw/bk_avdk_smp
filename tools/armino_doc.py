@@ -82,6 +82,29 @@ def build_armino_doc(source_path, dest_path, build_path, landir, version):
 	run_cmd(f'rm -rf {dest_path} {build_path}/{landir}/inc')
 	run_cmd(f'rm -rf {dest_path} {build_path}/{landir}/latex')
 
+def _sync_readme_reference_projects(root_path, version):
+	"""更新 docs/README 参考工程表（与方案仓 sync 逻辑一致）。"""
+	docs_dir = os.path.join(root_path, "docs")
+	script = os.path.join(docs_dir, "armino_doc.py")
+	if not os.path.isfile(script):
+		return
+	soc = os.environ.get("ARMINO_SOC", "bk7258")
+	if version in (None, "", "latest"):
+		version = {"bk7258": "v3.1.1", "bk7259": "v4.0.1"}.get(soc, "v3.1.1")
+	proc = subprocess.run(
+		[
+			sys.executable,
+			script,
+			"--sync-readme-projects",
+			"--version",
+			version,
+		],
+		cwd=docs_dir,
+		env=os.environ.copy(),
+	)
+	if proc.returncode:
+		sys.exit(proc.returncode)
+
 def build_html(source_path, dest_path, build_path, landir):
 	print("found souce: " + source_path + " dest: " + dest_path + " build: " + build_path)
 	command = "make -C " + source_path + " arminodocs -j32 " + "TARGET_DIR=" + dest_path
@@ -134,6 +157,7 @@ def build_pdf(source_path, dest_path, build_path, landir):
 
 def build_doc(target, docs_path, build_path, version):
 	print("build %s docs" % target)
+	_sync_readme_reference_projects(os.path.normpath(os.path.join(docs_path, "..")), version)
 
 	subdirectories = [d for d in os.listdir(docs_path) if os.path.isdir(os.path.join(docs_path, d))]
 	white_list = {"en", "zh_CN"}
@@ -152,6 +176,7 @@ def build_doc(target, docs_path, build_path, version):
 
 def build_all(docs_path, build_path, version):
 	print("build all docs")
+	_sync_readme_reference_projects(os.path.normpath(os.path.join(docs_path, "..")), version)
 
 	subdirectories = [d for d in os.listdir(docs_path) if os.path.isdir(os.path.join(docs_path, d))]
 	black_list = {"common", ".git"}
@@ -160,6 +185,35 @@ def build_all(docs_path, build_path, version):
 	for subdir in target_dirs:
 		print("found target: " + subdir)
 		build_doc(subdir, docs_path + "/" + subdir, build_path + "/" + subdir, version)
+
+def clean_docs():
+	root_path = os.getcwd()
+	docs_path = os.path.join(root_path, "docs")
+	build_path = os.path.join(root_path, "build", "doc", "smp_doc")
+	run_cmd(f'rm -rf {build_path}')
+	if not os.path.isdir(docs_path):
+		return
+	for soc in os.listdir(docs_path):
+		soc_dir = os.path.join(docs_path, soc)
+		if not os.path.isdir(soc_dir):
+			continue
+		run_cmd(f'rm -rf {soc_dir}/build')
+		run_cmd(f'rm -rf {soc_dir}/__pycache__')
+		for lan in ("en", "zh_CN"):
+			lan_dir = os.path.join(soc_dir, lan)
+			if not os.path.isdir(lan_dir):
+				continue
+			run_cmd(f'rm -rf {lan_dir}/_build')
+			run_cmd(f'rm -rf {lan_dir}/xml')
+			run_cmd(f'rm -rf {lan_dir}/xml_in')
+			run_cmd(f'rm -rf {lan_dir}/man')
+			run_cmd(f'rm -rf {lan_dir}/__pycache__')
+			run_cmd(f'rm -rf {lan_dir}/examples/projects')
+			run_cmd(f'rm -rf {lan_dir}/projects')
+			run_cmd(f'rm -rf {lan_dir}/source')
+			run_cmd(f'rm -f {lan_dir}/sphinx-warning-log.txt')
+			run_cmd(f'rm -f {lan_dir}/sphinx-warning-log-sanitized.txt')
+			run_cmd(f'rm -f {lan_dir}/doxygen-warning-log.txt')
 
 def main(argv):
 	parser = argparse.ArgumentParser()
@@ -170,27 +224,29 @@ def main(argv):
 	args = parser.parse_args()
 
 	root_path = os.getcwd()
-	if 'ARMINO_SOC' in os.environ:
-		soc_name = os.getenv('ARMINO_SOC')
-	else:
-		raise RuntimeError("not get soc name")
-	build_path = root_path + f"/build/doc/smp_doc"
+	soc_name = os.environ.get("ARMINO_SOC", "bk7258")
+	os.environ.setdefault("ARMINO_SOC", soc_name)
+	build_path = os.path.join(root_path, "build", "doc", "smp_doc")
 	if os.path.exists(build_path) == False:
 		os.makedirs(build_path, exist_ok=True)
 
 	if args.clean and args.target == "all":
+		clean_docs()
 		return
 
-	run_cmd(f'cp {root_path}/docs/version.json {build_path}/version.json')
+	root_version_path = os.path.join(root_path, "docs", "version.json")
+	build_version_path = os.path.join(build_path, "version.json")
+	run_cmd(f'cp {root_version_path} {build_version_path}')
 
 	if args.clean == False and args.target == "all":
-		build_all(root_path + "/docs", build_path, args.version)
+		build_all(os.path.join(root_path, "docs"), build_path, args.version)
 		return
- 
-	if os.path.exists(root_path + "/docs/" + args.target):
-		build_doc(args.target, root_path + "/docs/" + args.target, build_path, args.version)
+
+	target_path = os.path.join(root_path, "docs", args.target)
+	if os.path.exists(target_path):
+		build_doc(args.target, target_path, os.path.join(build_path, args.target), args.version)
 	else:
-		print("Error not found target: %s" % (root_path + "/docs/" + args.target))
+		print("Error not found target: %s" % target_path)
 
 if __name__ == "__main__":
 	main(sys.argv)

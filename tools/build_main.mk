@@ -216,7 +216,8 @@ cp_doc:
 	@make doc ARMINO_TOOLS_PATH=$(ARMINO_TOOLS_PATH) -C $(ARMINO_CP_DIR)
 
 smp_doc:
-	@python3 ./tools/armino_doc.py $(DOCS_PARAMTERS)
+	@ARMINO_SOC=$${ARMINO_SOC:-bk7258} ARMINO_AVDK_DIR=$(ARMINO_AVDK_DIR) \
+		python3 ./tools/armino_doc.py $(DOCS_PARAMTERS)
 
 doc: smp_doc ap_doc cp_doc
 

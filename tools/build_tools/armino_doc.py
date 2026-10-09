@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import shutil
 import subprocess
 import sys
 import re
@@ -227,50 +228,100 @@ def run_cmd(cmd):
     ret = p.wait()
     return p
 
+def _cjk_display_width(text: str) -> int:
+	"""Return reST title underline width (wide/fullwidth chars count as 2)."""
+	import unicodedata
+	width = 0
+	for ch in text:
+		if unicodedata.east_asian_width(ch) in ('W', 'F'):
+			width += 2
+		else:
+			width += 1
+	return width + 4
+
+
+def _write_text_if_changed(path, text, encoding="utf-8"):
+	if os.path.isfile(path):
+		with open(path, "r", encoding=encoding) as f:
+			if f.read() == text:
+				return False
+	os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+	with open(path, "w", encoding=encoding, newline="\n") as f:
+		f.write(text)
+	return True
+
+
+def write_projects_index(dst_path, title, entries):
+	normalized_entries = sorted(set(entries))
+	if not normalized_entries:
+		return
+
+	lines = [
+		title,
+		"=" * _cjk_display_width(title),
+		"",
+		".. toctree::",
+		"   :maxdepth: 1",
+		"",
+	]
+	for entry in normalized_entries:
+		lines.append(f"   {entry}/index")
+	lines.append("")
+	_write_text_if_changed(os.path.join(dst_path, "index.rst"), "\n".join(lines))
+
+
+def get_projects_index_title(src_path, lan):
+	dirname = os.path.basename(src_path)
+	if dirname == "projects":
+		return "Projects" if lan == "en" else "项目示例"
+	title = dirname.replace("_", " ").replace("-", " ")
+	return title.title() if lan == "en" else title
+
+
 def copy_projects_doc(src_path, dst_path, lan):
-    print(f"copy_projects_doc: {src_path} -> {dst_path}")
-    if not os.path.isdir(src_path):
-        return 0
+	"""递归拷贝参考工程文档；无根 README 的分类目录生成 toctree index.rst。"""
+	print(f"copy_projects_doc: {src_path} -> {dst_path}")
+	if not os.path.isdir(src_path):
+		return 0
 
-    has_doc = False
-    has_cmakelist = 0
+	skip_dirs = {".git", "build", "__pycache__"}
+	child_doc_dirs = []
+	src_child_names = set()
+	for item in sorted(os.listdir(src_path)):
+		if item in skip_dirs or item.startswith("."):
+			continue
+		item_path = os.path.join(src_path, item)
+		item_dst_path = os.path.join(dst_path, item)
+		if os.path.isdir(item_path):
+			src_child_names.add(item)
+			if copy_projects_doc(item_path, item_dst_path, lan):
+				child_doc_dirs.append(item)
 
-    # 检查当前文件夹是否为projects，如果是则设置has_doc = True
-    if os.path.basename(src_path) == 'projects':
-        has_doc = True
+	if os.path.isdir(dst_path):
+		for item in os.listdir(dst_path):
+			item_dst_path = os.path.join(dst_path, item)
+			if os.path.isdir(item_dst_path) and item not in src_child_names:
+				shutil.rmtree(item_dst_path)
 
-    for item in os.listdir(src_path):
-        item_path = os.path.join(src_path, item)
-        if os.path.isfile(item_path):
-            if item == "README.md" and lan == 'en':
-                has_doc = True
-            elif item == "README_CN.md" and lan == 'zh_CN':
-                has_doc = True
-            elif item == "projects.rst":
-                has_doc = True
+	readme_name = "README.md" if lan == "en" else "README_CN.md"
+	readme_path = os.path.join(src_path, readme_name)
+	projects_rst_path = os.path.join(src_path, "projects.rst")
+	has_local_doc = os.path.isfile(readme_path) or os.path.isfile(projects_rst_path)
 
-            if item == "CMakeLists.txt":
-                has_cmakelist = 1
+	if not has_local_doc and not child_doc_dirs:
+		if os.path.isdir(dst_path):
+			shutil.rmtree(dst_path)
+		return 0
 
-    if has_doc == False:
-        return 0
-
-    run_cmd(f'mkdir -p {dst_path}')
-    translate_md2rst(src_path, dst_path, lan)
-
-    if has_cmakelist == 1:
-        return 1
-
-    for item in os.listdir(src_path):
-        item_path = os.path.join(src_path, item)
-        item_dst_path = os.path.join(dst_path, item)
-        if os.path.isdir(item_path):
-            has_cmakelist = has_cmakelist + copy_projects_doc(item_path, item_dst_path, lan)
-
-    if (has_cmakelist == 0):
-        run_cmd(f'rm -rf {dst_path}')
-
-    return has_cmakelist
+	os.makedirs(dst_path, exist_ok=True)
+	if os.path.isfile(readme_path):
+		translate_md2rst(src_path, dst_path, lan)
+	elif os.path.isfile(projects_rst_path):
+		dst_index = os.path.join(dst_path, "index.rst")
+		shutil.copyfile(projects_rst_path, dst_index)
+	else:
+		write_projects_index(dst_path, get_projects_index_title(src_path, lan), child_doc_dirs)
+	return 1
 
 def build_lan_doc(doc_path, target, lan):
     # 无论路径是否包含ap/docs，都确保lan_dir被定义
