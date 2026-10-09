@@ -61,7 +61,7 @@ mkdir -p ~/armino && cd ~/armino
 git clone --branch release/v3.1.1 https://github.com/bekencorp/bk_avdk_smp.git
 ```
 
-For details, see: [Getting Started](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/en/v3.1.1/get-started/index.html).
+For details, see: [Armino SDK Code download](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/en/v3.1.1/get-started/index.html#armino-sdk-code-download).
 
 ## Build Environment
 
@@ -83,9 +83,9 @@ Download and install [Armino Bash](https://dl.bekencorp.com/tools/arminosdk/Wind
 
 ### Docker build
 
-Use the [`bekencorp/armino-idk`](https://hub.docker.com/r/bekencorp/armino-idk/tags) image. Choose tag `1.5` or newer. Windows / Linux / macOS are supported.
+Use the [bekencorp/armino-idk](https://hub.docker.com/r/bekencorp/armino-idk/tags) image. Choose tag `1.5` or newer. Windows / Linux / macOS are supported.
 
-For details, see: [Armino SMP Getting Started: Environment Setup and Build](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/en/v3.1.1/get-started/index.html).
+For details, see: [Environment Deployment and Compilation](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/en/v3.1.1/get-started/index.html#smp-get-started-env).
 
 ## Build a Project
 
@@ -109,8 +109,6 @@ After a successful build, the firmware for flashing is at the following path (re
 build/bk7258/app/package/all-app.bin
 ```
 
-For details, see: [Getting Started](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/en/v3.1.1/get-started/index.html).
-
 ## Flash Firmware
 
 Flash the firmware with either of the following:
@@ -120,23 +118,29 @@ Flash the firmware with either of the following:
 
 Select the `all-app.bin` firmware built in the previous section.
 
-For details, see: [Armino SMP Getting Started](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/en/v3.1.1/get-started/index.html).
-
+For details, see: [Burn Code](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/en/v3.1.1/get-started/index.html#smp-get-started-flash).
 ## Example Projects
-
-Typical projects by category are listed below. More examples are under `projects/` in the SDK repository.
-
-| Project | Main features | Details (see docs) |
-| --- | --- | --- |
-| `dvp_example` | Multimedia / camera: DVP capture with MJPEG/H.264 output | `projects/dvp_example/README.md` |
-| `rgb_lcd_example` | Multimedia / display: RGB LCD | `projects/rgb_lcd_example/README.md` |
-| `encoder_example` | Multimedia / codec: YUV422 to MJPEG encode | `projects/encoder_example/README.md` |
-| `player_service_example` | Multimedia / audio: bk_player_service playback path | `projects/player_service_example/README.md` |
-| `lvgl/music` | GUI: LVGL local music player demo | `projects/lvgl/music/README.md` |
-| `bluetooth/hfp_ag` | Bluetooth: HFP AG example | `projects/bluetooth/hfp_ag/README.md` |
-| `uvc_example` | Multimedia / UVC: USB camera capture | `projects/uvc_example/README.md` |
-| `ap_powerdown_keepalive` | Low power: AP power-down keepalive with CP | `projects/ap_powerdown_keepalive/README.md` |
-
+The following reference projects are listed; click a name for details.<!-- readme-projects:begin -->
+<table>
+<tbody>
+<tr><td><a href="/projects/ap_powerdown_keepalive/">ap_powerdown_keepalive</a></td><td><a href="/projects/app/">app</a></td><td><a href="/projects/app_ab/">app_ab</a></td></tr>
+<tr><td><a href="/projects/asr_service_example/">asr_service_example</a></td><td><a href="/projects/audio_player_example/">audio_player_example</a></td><td><a href="/projects/bluetooth/central/">central</a></td></tr>
+<tr><td><a href="/projects/bluetooth/headset/">headset</a></td><td><a href="/projects/bluetooth/hfp_ag/">hfp_ag</a></td><td><a href="/projects/bluetooth/polar/">polar</a></td></tr>
+<tr><td><a href="/projects/dma2d_example/">dma2d_example</a></td><td><a href="/projects/doorbell_asr/">doorbell_asr</a></td><td><a href="/projects/draw_osd_example/">draw_osd_example</a></td></tr>
+<tr><td><a href="/projects/dvp_example/">dvp_example</a></td><td><a href="/projects/encoder_example/">encoder_example</a></td><td><a href="/projects/eth_example/">eth_example</a></td></tr>
+<tr><td><a href="/projects/jpeg_decode_example/">jpeg_decode_example</a></td><td><a href="/projects/lvgl/86box/">86box</a></td><td><a href="/projects/lvgl/benchmark/">benchmark</a></td></tr>
+<tr><td><a href="/projects/lvgl/benchmark_v9/">benchmark_v9</a></td><td><a href="/projects/lvgl/freetype_font/">freetype_font</a></td><td><a href="/projects/lvgl/img_decode/">img_decode</a></td></tr>
+<tr><td><a href="/projects/lvgl/music/">music</a></td><td><a href="/projects/lvgl/widgets/">widgets</a></td><td><a href="/projects/lvgl/widgets_v9/">widgets_v9</a></td></tr>
+<tr><td><a href="/projects/lwip_psram_example/">lwip_psram_example</a></td><td><a href="/projects/mcu_lcd_example/">mcu_lcd_example</a></td><td><a href="/projects/player_service_example/">player_service_example</a></td></tr>
+<tr><td><a href="/projects/pm_ap_powerdown/">pm_ap_powerdown</a></td><td><a href="/projects/qspi_lcd_example/">qspi_lcd_example</a></td><td><a href="/projects/rgb_lcd_example/">rgb_lcd_example</a></td></tr>
+<tr><td><a href="/projects/secureboot_xip/">secureboot_xip</a></td><td><a href="/projects/secureboot_xip_no_encrypt/">secureboot_xip_no_encrypt</a></td><td><a href="/projects/spi_lcd_example/">spi_lcd_example</a></td></tr>
+<tr><td><a href="/projects/sram_lite/">sram_lite</a></td><td><a href="/projects/test/platform/">platform</a></td><td><a href="/projects/uvc_dualstream_example/">uvc_dualstream_example</a></td></tr>
+<tr><td><a href="/projects/uvc_example/">uvc_example</a></td><td><a href="/projects/video_pipeline_example/">video_pipeline_example</a></td><td><a href="/projects/video_player_example/">video_player_example</a></td></tr>
+<tr><td><a href="/projects/voice_service_example/">voice_service_example</a></td><td><a href="/projects/wifi/bridge/">bridge</a></td><td><a href="/projects/wifi/iperf/">iperf</a></td></tr>
+<tr><td><a href="/projects/wifi/p2p/">p2p</a></td><td><a href="/projects/wifi/rlk_demo/">rlk_demo</a></td></tr>
+</tbody>
+</table>
+<!-- readme-projects:end -->
 For details, see: [Create a New Project](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/en/v3.1.1/developer-guide/create_new_project_rule/index.html).
 
 ## Product Solutions

@@ -61,8 +61,6 @@ mkdir -p ~/armino && cd ~/armino
 git clone --branch release/v3.1.1 https://github.com/bekencorp/bk_avdk_smp.git
 ```
 
-代码获取的更多说明请参阅 [快速入门](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/zh_CN/v3.1.1/get-started/index.html)。
-
 ## 编译环境安装
 
 Armino SMP 支持本地编译和 Docker 编译，可根据开发平台选择以下方式部署编译环境。
@@ -83,9 +81,9 @@ sudo bash tools/env_tools/setup/armino_env_setup.sh
 
 ### Docker 编译
 
-Docker 编译镜像为 [`bekencorp/armino-idk`](https://hub.docker.com/r/bekencorp/armino-idk/tags)，请选择 `1.5` 或更高版本的镜像标签，支持 Windows / Linux / macOS。
+Docker 编译镜像为 [bekencorp/armino-idk](https://hub.docker.com/r/bekencorp/armino-idk/tags)，请选择 `1.5` 或更高版本的镜像标签，支持 Windows / Linux / macOS。
 
-详细安装步骤请参阅 [Armino SMP 快速入门：环境部署及编译](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/zh_CN/v3.1.1/get-started/index.html)。
+详细安装步骤请参阅 [环境部署及编译](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/zh_CN/v3.1.1/get-started/index.html#smp-get-started-env)。
 
 ## 编译工程
 
@@ -109,8 +107,6 @@ cd ~/armino/bk_avdk_smp
 build/bk7258/app/package/all-app.bin
 ```
 
-编译命令的详细说明请参阅 [快速入门](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/zh_CN/v3.1.1/get-started/index.html)。
-
 ## 烧录固件
 
 可选择以下任一方式烧录固件：
@@ -120,23 +116,29 @@ build/bk7258/app/package/all-app.bin
 
 烧录时请选择上一节编译生成的 `all-app.bin` 固件文件。
 
-详细烧录流程请参阅 [Armino SMP 快速入门](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/zh_CN/v3.1.1/get-started/index.html)。
-
+详细烧录流程请参阅 [烧录代码](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/zh_CN/v3.1.1/get-started/index.html#smp-get-started-flash)。
 ## 参考工程
-
-以下按类型列出典型工程；更多示例见 SDK 仓库 `projects/` 目录。
-
-| 工程名 | 主要功能 | 详细说明（见文档） |
-| --- | --- | --- |
-| `dvp_example` | 多媒体 / 摄像头：DVP 采集与 MJPEG / H.264 输出 | `projects/dvp_example/README_CN.md` |
-| `rgb_lcd_example` | 多媒体 / 显示：RGB 接口 LCD 显示 | `projects/rgb_lcd_example/README_CN.md` |
-| `encoder_example` | 多媒体 / 编解码：YUV422 编码为 MJPEG | `projects/encoder_example/README_CN.md` |
-| `player_service_example` | 多媒体 / 音频：bk_player_service 播放链路 | `projects/player_service_example/README_CN.md` |
-| `lvgl/music` | GUI：LVGL 本地音乐播放器 Demo | `projects/lvgl/music/README_CN.md` |
-| `bluetooth/hfp_ag` | 蓝牙：HFP AG 示例 | `projects/bluetooth/hfp_ag/README_CN.md` |
-| `uvc_example` | 多媒体 / UVC：USB 摄像头采集 | `projects/uvc_example/README_CN.md` |
-| `ap_powerdown_keepalive` | 低功耗：AP 掉电保活与 CP keepalive | `projects/ap_powerdown_keepalive/README_CN.md` |
-
+以下列出参考工程，可点击查看工程详细说明。<!-- readme-projects:begin -->
+<table>
+<tbody>
+<tr><td><a href="/projects/ap_powerdown_keepalive/">ap_powerdown_keepalive</a></td><td><a href="/projects/app/">app</a></td><td><a href="/projects/app_ab/">app_ab</a></td></tr>
+<tr><td><a href="/projects/asr_service_example/">asr_service_example</a></td><td><a href="/projects/audio_player_example/">audio_player_example</a></td><td><a href="/projects/bluetooth/central/">central</a></td></tr>
+<tr><td><a href="/projects/bluetooth/headset/">headset</a></td><td><a href="/projects/bluetooth/hfp_ag/">hfp_ag</a></td><td><a href="/projects/bluetooth/polar/">polar</a></td></tr>
+<tr><td><a href="/projects/dma2d_example/">dma2d_example</a></td><td><a href="/projects/doorbell_asr/">doorbell_asr</a></td><td><a href="/projects/draw_osd_example/">draw_osd_example</a></td></tr>
+<tr><td><a href="/projects/dvp_example/">dvp_example</a></td><td><a href="/projects/encoder_example/">encoder_example</a></td><td><a href="/projects/eth_example/">eth_example</a></td></tr>
+<tr><td><a href="/projects/jpeg_decode_example/">jpeg_decode_example</a></td><td><a href="/projects/lvgl/86box/">86box</a></td><td><a href="/projects/lvgl/benchmark/">benchmark</a></td></tr>
+<tr><td><a href="/projects/lvgl/benchmark_v9/">benchmark_v9</a></td><td><a href="/projects/lvgl/freetype_font/">freetype_font</a></td><td><a href="/projects/lvgl/img_decode/">img_decode</a></td></tr>
+<tr><td><a href="/projects/lvgl/music/">music</a></td><td><a href="/projects/lvgl/widgets/">widgets</a></td><td><a href="/projects/lvgl/widgets_v9/">widgets_v9</a></td></tr>
+<tr><td><a href="/projects/lwip_psram_example/">lwip_psram_example</a></td><td><a href="/projects/mcu_lcd_example/">mcu_lcd_example</a></td><td><a href="/projects/player_service_example/">player_service_example</a></td></tr>
+<tr><td><a href="/projects/pm_ap_powerdown/">pm_ap_powerdown</a></td><td><a href="/projects/qspi_lcd_example/">qspi_lcd_example</a></td><td><a href="/projects/rgb_lcd_example/">rgb_lcd_example</a></td></tr>
+<tr><td><a href="/projects/secureboot_xip/">secureboot_xip</a></td><td><a href="/projects/secureboot_xip_no_encrypt/">secureboot_xip_no_encrypt</a></td><td><a href="/projects/spi_lcd_example/">spi_lcd_example</a></td></tr>
+<tr><td><a href="/projects/sram_lite/">sram_lite</a></td><td><a href="/projects/test/platform/">platform</a></td><td><a href="/projects/uvc_dualstream_example/">uvc_dualstream_example</a></td></tr>
+<tr><td><a href="/projects/uvc_example/">uvc_example</a></td><td><a href="/projects/video_pipeline_example/">video_pipeline_example</a></td><td><a href="/projects/video_player_example/">video_player_example</a></td></tr>
+<tr><td><a href="/projects/voice_service_example/">voice_service_example</a></td><td><a href="/projects/wifi/bridge/">bridge</a></td><td><a href="/projects/wifi/iperf/">iperf</a></td></tr>
+<tr><td><a href="/projects/wifi/p2p/">p2p</a></td><td><a href="/projects/wifi/rlk_demo/">rlk_demo</a></td></tr>
+</tbody>
+</table>
+<!-- readme-projects:end -->
 新建工程、分区与配置方法请参阅 [新建工程介绍](https://docs.bekencorp.com/arminodoc/bk_avdk_smp/smp_doc/bk7258/zh_CN/v3.1.1/developer-guide/create_new_project_rule/index.html)。
 
 ## 产品解决方案
