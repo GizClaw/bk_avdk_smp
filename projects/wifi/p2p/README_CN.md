@@ -30,7 +30,7 @@ p2p/
 ## 3. 硬件与配置
 - 硬件：两块 BK7258 SMP 开发板（或一块板 + 支持 P2P 的手机）；UART0 作为 AP 核 CLI。
 - AP：`ap/config/bk7258_ap/config` 中 `CONFIG_P2P=y`。
-- CP：`cp/config/bk7258/config` 中 `CONFIG_P2P=y` 且 `CONFIG_WPS=y`（P2P 依赖 WPS）。
+- CP：`cp/config/bk7258/config` 中开启 `CONFIG_P2P=y` 与 `CONFIG_WPS=y` （P2P 依赖 WPS）。
 - Flash / RAM：使用本工程默认分区即可。
 - 移植时需实现并注册 P2P 事件回调（`demo_p2p_event_cb`），详见开发者指南。
 
@@ -42,7 +42,7 @@ make bk7258 PROJECT=wifi/p2p
 按 SDK 烧录工具烧录 AP/CP 镜像后复位开发板。
 
 ## 5. 运行流程
-在 **AP 核** 串口操作。本工程 CLI 为 `p2p ...`（不是文档里部分示例写的 `ap_cmd p2p`）。
+在 **AP 核** 串口操作。本工程 CLI 为 `p2p ...` （不是文档里部分示例写的 `ap_cmd p2p`）。
 
 1. 开启 P2P：
 
@@ -67,10 +67,10 @@ make bk7258 PROJECT=wifi/p2p
        p2p disable
        p2p help
 
-典型双板流程：两侧都 `p2p enable`；一侧 Intent `15`（GO）并 `p2p listen`，另一侧 Intent `0`（GC）并 `p2p find`，随后 connect，在 log 中确认 GO/GC IP。
+典型双板流程：两侧都 `p2p enable`；一侧 Intent `15` （GO）并 `p2p listen`，另一侧 Intent `0` （GC）并 `p2p find`，随后 connect，在 log 中确认 GO/GC IP。
 
 ## 6. 常见问题
-- **没有 `p2p` 命令**：确认烧录的是本工程，且 AP 已打开 `CONFIG_P2P=y`。
+- **没有 p2p 命令**：确认烧录的是本工程，且 AP 已打开 `CONFIG_P2P=y`。
 - **enable 失败，或 GO 连接/断开后 listen 异常**：检查 CP 的 `CONFIG_WPS=y`；不要同时跑 STA 与 P2P（不支持并发）。
 - **log 中没有 DEVICE_FOUND**：两侧先 enable 再 find/listen；设备靠近，并使用社交信道 1/6/11。
 - **重连后 ioctl busy / ROC 错误**：查看 `wpa` / `wifid` 串口日志；若上次会话未干净拆除，先 cancel/disable 再 enable。

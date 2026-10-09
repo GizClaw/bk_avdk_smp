@@ -70,7 +70,7 @@ Operate on the **AP-core** UART. CLI names are `p2p ...` (not `ap_cmd p2p`).
 Typical two-board case: both enable P2P; one uses Intent `15` (GO) and `p2p listen`, the other uses Intent `0` (GC) and `p2p find`, then connect and confirm GO/GC IP in logs.
 
 ## 6. Troubleshooting
-- **`p2p` command missing**: Confirm this project is flashed and `CONFIG_P2P=y` on AP.
+- **p2p command missing**: Confirm this project is flashed and `CONFIG_P2P=y` on AP.
 - **Enable fails or listen dies after GO connect/disconnect**: Check CP `CONFIG_WPS=y`; do not run STA and P2P together (no concurrent mode).
 - **No DEVICE_FOUND in logs**: Both sides should `p2p enable` then `find`/`listen`; keep devices close and on social channels 1/6/11.
 - **ioctl busy / ROC errors after reconnect**: See UART `wpa` / `wifid` logs; cancel and disable before the next enable if a previous session did not tear down cleanly.
