@@ -803,6 +803,7 @@ bk_err_t bk_pwm_set_period_duty(pwm_chan_t sw_ch, pwm_period_duty_config_t *conf
 
 	pwm_id_t id;
 	pwm_ch_t hw_ch;
+	bool from_gpio_mode;
 
 	pwm_sw_ch_to_hw_id_ch(sw_ch, &id, &hw_ch);
 
@@ -842,7 +843,8 @@ bk_err_t bk_pwm_set_period_duty(pwm_chan_t sw_ch, pwm_period_duty_config_t *conf
 		return BK_OK;
 	}
 
-	if (s_pwm[id].chan_gpio_mode_bits & BIT(hw_ch)){
+	from_gpio_mode = (s_pwm[id].chan_gpio_mode_bits & BIT(hw_ch)) != 0;
+	if (from_gpio_mode) {
 		gpio_dev_map(s_pwm_pin_id_map[id][hw_ch].gpio_id, s_pwm_pin_id_map[id][hw_ch].gpio_dev);
 	}
 
@@ -864,6 +866,28 @@ bk_err_t bk_pwm_set_period_duty(pwm_chan_t sw_ch, pwm_period_duty_config_t *conf
 	}
 	pwm_set_channel_config(sw_ch, config);
 	pwm_hal_set_flip_mode(&s_pwm[id].hal, hw_ch, 1);
+
+	/* GPIO direct output leaves TIM running but disconnects the PWM channel.
+	 * Generate an update event when reconnecting it so the timer's internal
+	 * compare/output state is synchronized with the newly loaded shadow state. */
+	if (from_gpio_mode) {
+		switch (hw_ch) {
+		case PWM_CH_0:
+		case PWM_CH_1:
+			pwm_hal_set_pwm_edtr_ug1(&s_pwm[id].hal, 1);
+			break;
+		case PWM_CH_2:
+		case PWM_CH_3:
+			pwm_hal_set_pwm_edtr_ug2(&s_pwm[id].hal, 1);
+			break;
+		case PWM_CH_4:
+		case PWM_CH_5:
+			pwm_hal_set_pwm_edtr_ug3(&s_pwm[id].hal, 1);
+			break;
+		default:
+			break;
+		}
+	}
 
 	return BK_OK;
 }
