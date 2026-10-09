@@ -14,6 +14,9 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <modules/pm.h>
 #include <driver/hal/hal_gpio_types.h>
 #include <driver/gpio.h>
@@ -41,6 +44,7 @@ extern "C" {
 #define PM_WAKEUP_CONFIG_CMD                 (0xf)
 
 #define PM_SLEEP_WAKEUP_NOTIFY_CMD           (0x10)
+#define PM_PSRAM_STACK_SLEEP_CTRL_CMD        (0x11)
 
 #define PM_AON_RTC_DEFAULT_TICK_COUNT        (32)//only for cp1 using aon rtc
 
@@ -61,6 +65,145 @@ extern "C" {
 #define PWR_MNG_PM_FIELD(type, offset) \
 	(*(volatile type *)(CONFIG_PWR_MNG_ADDR + (offset) + \
 		0U * sizeof(char[(((offset) + sizeof(type)) <= PWR_MNG_PM_RESERVED_SIZE) ? 1 : -1])))
+
+typedef struct {
+	volatile uint32_t version;
+	volatile uint32_t low;
+	volatile uint32_t high;
+} pm_shared_u64_words_t;
+
+#define PM_SHARED_U64_MAX_RETRIES 32U
+
+_Static_assert(sizeof(pm_shared_u64_words_t) == 12U,
+	"shared PM 64-bit seqlock must occupy twelve bytes");
+_Static_assert(offsetof(pm_shared_u64_words_t, version) == 0U,
+	"shared PM version must be first");
+_Static_assert(offsetof(pm_shared_u64_words_t, low) == 4U,
+	"shared PM low word must follow the version");
+_Static_assert(offsetof(pm_shared_u64_words_t, high) == 8U,
+	"shared PM high word must follow the low word");
+
+static inline uint64_t pm_shared_u64_load(
+	const volatile pm_shared_u64_words_t *field)
+{
+	for (uint32_t retry = 0U; retry < 32U; retry++) {
+		const uint32_t first =
+			__atomic_load_n(&field->version, __ATOMIC_ACQUIRE);
+		if ((first & 1U) != 0U) {
+			continue;
+		}
+		const uint32_t high =
+			__atomic_load_n(&field->high, __ATOMIC_RELAXED);
+		const uint32_t low =
+			__atomic_load_n(&field->low, __ATOMIC_RELAXED);
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+		const uint32_t second =
+			__atomic_load_n(&field->version, __ATOMIC_ACQUIRE);
+		if ((first == second) && ((second & 1U) == 0U)) {
+			return ((uint64_t)high << 32) | low;
+		}
+	}
+	return UINT64_MAX;
+}
+
+static inline bool pm_shared_u64_store(
+	volatile pm_shared_u64_words_t *field, uint64_t value)
+{
+	for (uint32_t retry = 0U; retry < 32U; retry++) {
+		uint32_t version =
+			__atomic_load_n(&field->version, __ATOMIC_ACQUIRE);
+		if (((version & 1U) != 0U) || (version > UINT32_MAX - 2U)) {
+			continue;
+		}
+		if (!__atomic_compare_exchange_n(
+				&field->version, &version, version + 1U, false,
+				__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+			continue;
+		}
+		__atomic_store_n(&field->low, (uint32_t)value, __ATOMIC_RELAXED);
+		__atomic_store_n(
+			&field->high, (uint32_t)(value >> 32), __ATOMIC_RELAXED);
+		__atomic_thread_fence(__ATOMIC_RELEASE);
+		__atomic_store_n(
+			&field->version, version + 2U, __ATOMIC_RELEASE);
+		return true;
+	}
+	return false;
+}
+
+static inline bool pm_shared_u64_bit_get(
+	const volatile pm_shared_u64_words_t *field, uint32_t bit)
+{
+	if (bit >= 64U) {
+		return true;
+	}
+	const uint64_t value = pm_shared_u64_load(field);
+	return (value & (1ULL << bit)) != 0U;
+}
+
+static inline bool pm_shared_u64_bit_set(
+	volatile pm_shared_u64_words_t *field, uint32_t bit)
+{
+	if (bit >= 64U) {
+		return false;
+	}
+	for (uint32_t retry = 0U; retry < 32U; retry++) {
+		uint32_t version =
+			__atomic_load_n(&field->version, __ATOMIC_ACQUIRE);
+		if (((version & 1U) != 0U) || (version > UINT32_MAX - 2U)) {
+			continue;
+		}
+		if (!__atomic_compare_exchange_n(
+				&field->version, &version, version + 1U, false,
+				__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+			continue;
+		}
+		volatile uint32_t *target =
+			bit < 32U ? &field->low : &field->high;
+		(void)__atomic_fetch_or(
+			target, 1UL << (bit & 31U), __ATOMIC_RELAXED);
+		__atomic_thread_fence(__ATOMIC_RELEASE);
+		__atomic_store_n(
+			&field->version, version + 2U, __ATOMIC_RELEASE);
+		return true;
+	}
+	return false;
+}
+
+static inline bool pm_shared_u64_bit_clear(
+	volatile pm_shared_u64_words_t *field, uint32_t bit)
+{
+	if (bit >= 64U) {
+		return false;
+	}
+	for (uint32_t retry = 0U; retry < 32U; retry++) {
+		uint32_t version =
+			__atomic_load_n(&field->version, __ATOMIC_ACQUIRE);
+		if (((version & 1U) != 0U) || (version > UINT32_MAX - 2U)) {
+			continue;
+		}
+		if (!__atomic_compare_exchange_n(
+				&field->version, &version, version + 1U, false,
+				__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+			continue;
+		}
+		volatile uint32_t *target =
+			bit < 32U ? &field->low : &field->high;
+		(void)__atomic_fetch_and(
+			target, ~(1UL << (bit & 31U)), __ATOMIC_RELAXED);
+		__atomic_thread_fence(__ATOMIC_RELEASE);
+		__atomic_store_n(
+			&field->version, version + 2U, __ATOMIC_RELEASE);
+		return true;
+	}
+	return false;
+}
+
+static inline bool pm_shared_u64_is_zero(
+	const volatile pm_shared_u64_words_t *field)
+{
+	return pm_shared_u64_load(field) == 0U;
+}
 
 #if ((PWR_MNG_FLASH_SHARED_OFFSET + PWR_MNG_FLASH_SHARED_SIZE) > CONFIG_PWR_MNG_SIZE)
 #error "PWR_MNG flash shared area exceeds PWR_MNG region"
@@ -85,10 +228,10 @@ extern "C" {
 
 #define FIXED_ADDR_DEEP_WAKEUP_GPIO_ID       PWR_MNG_PM_FIELD(uint32_t, 56)
 
-#define FIXED_ADDR_PM_AP_SLEEP_VOTE          PWR_MNG_PM_FIELD(uint64_t, 60)
-#define FIXED_ADDR_PM_AP_CLK_VOTE_STATE      PWR_MNG_PM_FIELD(uint64_t, 68)
+#define FIXED_ADDR_PM_AP_SLEEP_VOTE          PWR_MNG_PM_FIELD(pm_shared_u64_words_t, 60)
+#define FIXED_ADDR_PM_AP_CLK_VOTE_STATE      PWR_MNG_PM_FIELD(pm_shared_u64_words_t, 72)
 
-#define FIXED_ADDR_PM_MODULE_LV_SLEEP_STATE  PWR_MNG_PM_FIELD(uint64_t, 76)
+#define FIXED_ADDR_PM_MODULE_LV_SLEEP_STATE  PWR_MNG_PM_FIELD(pm_shared_u64_words_t, 84)
 
 /*Attention: Max PMshare memory size is 256 bytes*/
 
@@ -552,6 +695,7 @@ bk_err_t bk_pm_cp1_ctrl_state_set(pm_mailbox_communication_state_e state);
  *
  */
 bk_err_t pm_cp1_mailbox_send_data(uint32_t cmd, uint32_t param1,uint32_t param2,uint32_t param3);
+bk_err_t bk_pm_psram_stack_vote_sleep_ctrl(uint32_t sleep_state);
 /**
  * @brief pm vote power/clk on psram ctrl
  *
