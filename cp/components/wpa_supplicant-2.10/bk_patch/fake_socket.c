@@ -287,19 +287,32 @@ int fsocket_recv(SOCKET sk, struct ke_sk_params *params)
 
 	dl_list_for_each_safe(sk_msg, tmp, &element->sk_rx_msg, SOCKET_MSG, data)
 	{
-		if(sk_msg->len > params->len)
+		/*
+		 * A caller with no buffer (len == 0, buf == NULL) still dequeues and
+		 * frees one message, same as ke_sk_recv() already does for sk_tx_msg.
+		 * This lets a consumer that failed to allocate its scratch buffer
+		 * drain instead of skipping, so the list never grows on that path.
+		 */
+		if(params->len != 0 && params->buf != NULL)
 		{
-			WPA_LOGW("recv_buf_small:%d:%d\r\n", sk_msg->len, params->len);
+			if(sk_msg->len > params->len)
+			{
+				WPA_LOGW("recv_buf_small:%d:%d\r\n", sk_msg->len, params->len);
+			}
+
+			count = MIN(sk_msg->len, params->len);
+
+			BK_ASSERT(count); /* BK_ASSERT VERIFIED */
+			BK_ASSERT(sk_msg); /* BK_ASSERT VERIFIED */
+
+			os_memcpy((void *)params->buf, (void *)sk_msg->msg, count);
+			ret = count;
+			params->freq = sk_msg->extra_info;
 		}
-
-		count = MIN(sk_msg->len, params->len);
-
-		BK_ASSERT(count); /* BK_ASSERT VERIFIED */
-		BK_ASSERT(sk_msg); /* BK_ASSERT VERIFIED */
-
-		os_memcpy((void *)params->buf, (void *)sk_msg->msg, count);
-		ret = count;
-		params->freq = sk_msg->extra_info;
+		else
+		{
+			WPA_LOGD("drop sk_rx_msg\r\n");
+		}
 
 		os_free(sk_msg->msg);
 		sk_msg->msg = 0;

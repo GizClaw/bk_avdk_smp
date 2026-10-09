@@ -285,7 +285,22 @@ static void handle_read(int sock, void *eloop_ctx, void *sock_ctx)
     drv = eloop_ctx;
     buf = os_malloc(TMP_BUF_LEN);
     if(!buf) {
+        /*
+         * Returning here would leave the message queued, and this allocation
+         * is exactly the one that fails when the heap is low - so the queue
+         * would grow every time, consuming the memory needed to recover.
+         * Drop one message instead: a lost mgmt frame is retried by the peer,
+         * an exhausted heap is not recoverable.
+         */
+        struct ke_sk_params drop = {
+            .buf = NULL,
+            .len = 0,
+            .flag = 0,
+            .freq = 0
+        };
+
         WPA_LOGW("handle_read no mem\r\n");
+        fsocket_recv(sock, &drop);
         goto read_exit;
     }
 

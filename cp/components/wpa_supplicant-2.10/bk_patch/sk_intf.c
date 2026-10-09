@@ -59,7 +59,17 @@ void handle_dummy_read(int sock, void *eloop_ctx, void *sock_ctx)
 
     buf = os_malloc(TMP_BUF_LEN);
     if(!buf) {
+        /* Same defect as handle_read(): never skip the dequeue, or the
+         * sk_rx_msg list grows exactly when the heap is already low. */
+        struct ke_sk_params drop = {
+            .buf = NULL,
+            .len = 0,
+            .flag = 0,
+            .freq = 0
+        };
+
         WPA_LOGW("dummy_read no mem\r\n");
+        fsocket_recv(sock, &drop);
         goto dummy_exit;
     }
 
