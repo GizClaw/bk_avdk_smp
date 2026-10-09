@@ -14,6 +14,10 @@ if(CONFIG_FREERTOS)
 			platform_stub.c
 			freertos/str_arch.c
 		)
+		if(CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+			list(APPEND srcs freertos/v10/psram_stack_pm.c)
+			list(APPEND priv_requires bk_pm)
+		endif()
 	endif()
 
 	if(CONFIG_FULLY_HOSTED OR CONFIG_MEM_MGMT)
@@ -71,5 +75,5 @@ endif()
 
 	list(APPEND srcs rtos_ext.c)
 
-armino_component_register(SRCS "${srcs}" INCLUDE_DIRS "${incs}" REQUIRES cmsis PRIV_REQUIRES bk_common)
+armino_component_register(SRCS "${srcs}" INCLUDE_DIRS "${incs}" REQUIRES cmsis PRIV_REQUIRES bk_common "${priv_requires}")
 

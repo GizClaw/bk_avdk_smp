@@ -60,7 +60,31 @@ menu "Bk_rtos"
 			depends on FREERTOS_V10 || FREERTOS_SMP
 			bool "Create FreeRTOS Task stack in psram"
 			default n
-		
+
+		config CACHEABLE_PSRAM_TASK_STACK
+			bool "Enable cacheable AP PSRAM task stack"
+			default n
+			depends on SOC_BK7258
+			depends on FREERTOS_SMP
+			depends on PSRAM_AS_SYS_MEMORY
+			depends on DCACHE
+			depends on MPU
+			depends on !CACHE_ENABLE
+			depends on !LV_CODE_LOAD_PSRAM
+			help
+				Enable cacheable AP PSRAM task stack support for the supported
+				BK7258 FreeRTOS SMP configuration.
+
+		config CACHEABLE_PSRAM_TASK_STACK_PROFILE
+			bool "Profile cacheable PSRAM task stack cache maintenance"
+			default n
+			depends on CACHEABLE_PSRAM_TASK_STACK
+			help
+				Accumulate DWT cycle counts for the stack release/acquire
+				performed on every context switch, so the scheduler-path cost
+				can be bounded on target. Adds two cycle counter reads per
+				switch; keep disabled in production builds.
+
 		config QUEUE_IN_PSRAM
 			depends on FREERTOS_V10 || FREERTOS_SMP
 			bool "Create FreeRTOS queue in psram"

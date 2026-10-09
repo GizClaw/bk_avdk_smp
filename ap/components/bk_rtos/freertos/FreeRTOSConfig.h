@@ -132,6 +132,39 @@
 #define configUSE_TASK_PREEMPTION_DISABLE          1
 #endif // CONFIG_FREERTOS_SMP
 
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+#if !defined(CONFIG_MPU) || !CONFIG_MPU
+#error "Cacheable PSRAM task stacks require MPU support"
+#endif
+#include <stdbool.h>
+#define configUSE_CACHEABLE_PSRAM_TASK_STACK       1
+void rtos_psram_stack_fatal_reset(void) __attribute__((noreturn));
+#define configPSRAM_STACK_FATAL_RESET()             rtos_psram_stack_fatal_reset()
+int bk_rtos_psram_stack_pm_ensure_ready(void);
+int bk_rtos_psram_stack_pm_vote_active(void);
+int bk_rtos_psram_stack_pm_vote_released(void);
+int bk_rtos_psram_stack_pm_resync_pending(uint64_t pending_generation);
+#define configPSRAM_STACK_PM_ENSURE_READY()          bk_rtos_psram_stack_pm_ensure_ready()
+#define configPSRAM_STACK_PM_VOTE_ACTIVE()           bk_rtos_psram_stack_pm_vote_active()
+#define configPSRAM_STACK_PM_VOTE_RELEASED()         bk_rtos_psram_stack_pm_vote_released()
+#define configPSRAM_STACK_PM_RESYNC_PENDING( generation ) \
+    bk_rtos_psram_stack_pm_resync_pending( generation )
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK_PROFILE) && CONFIG_CACHEABLE_PSRAM_TASK_STACK_PROFILE
+#define configUSE_CACHEABLE_PSRAM_TASK_STACK_PROFILE 1
+#else
+#define configUSE_CACHEABLE_PSRAM_TASK_STACK_PROFILE 0
+#endif
+#if defined(configUSE_C_RUNTIME_TLS_SUPPORT) && (configUSE_C_RUNTIME_TLS_SUPPORT == 1)
+#include <reent.h>
+#define configTLS_BLOCK_TYPE                         struct _reent
+#define configINIT_TLS_BLOCK( xTLSBlock )            _REENT_INIT_PTR( &( xTLSBlock ) )
+#define configSET_TLS_BLOCK( xTLSBlock )             _impure_ptr = &( xTLSBlock )
+#define configDEINIT_TLS_BLOCK( xTLSBlock )          _reclaim_reent( &( xTLSBlock ) )
+#endif
+#else
+#define configUSE_CACHEABLE_PSRAM_TASK_STACK       0
+#endif
+
 #if CONFIG_FREERTOS_POSIX
 #define configUSE_APPLICATION_TASK_TAG             1
 #define configSUPPORT_STATIC_ALLOCATION            1
@@ -224,7 +257,6 @@ to exclude the API function. */
 #if CONFIG_FREERTOS_V10 || CONFIG_FREERTOS_SMP
 #define INCLUDE_xTaskGetHandle                      1
 #define INCLUDE_eTaskGetState                       1
-#define INCLUDE_xSemaphoreGetMutexHolder            1
 #endif
 
 #if CONFIG_FREERTOS_POSIX

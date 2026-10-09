@@ -19,6 +19,10 @@
 #include "rtos_impl.h"
 #include "cmsis_gcc.h"
 #include "spinlock.h"
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+#include <wdt_driver.h>
+#include "psram_stack_pm.h"
+#endif
 
 #define TAG "Rtos"
 
@@ -69,6 +73,42 @@ BaseType_t xTaskCreateInPsram( TaskFunction_t pxTaskCode,
                         UBaseType_t uxPriority,
                         TaskHandle_t * const pxCreatedTask,
                         const BaseType_t xCoreID );
+
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+BaseType_t xTaskCreateInNoncachePsram( TaskFunction_t pxTaskCode,
+                        const char * const pcName,
+                        const configSTACK_DEPTH_TYPE usStackDepth,
+                        void * const pvParameters,
+                        UBaseType_t uxPriority,
+                        TaskHandle_t * const pxCreatedTask,
+                        const BaseType_t xCoreID );
+
+extern volatile uint32_t ulPsramStackFatalReason;
+extern volatile BaseType_t xPsramStackFatalCore;
+extern volatile uint32_t ulPsramStackFatalStack;
+extern const char * volatile pcPsramStackFatalTask;
+extern const char *pcPsramStackFatalReasonName(void);
+
+void rtos_psram_stack_fatal_reset(void)
+{
+	const char *task_name = (const char *)pcPsramStackFatalTask;
+
+	/* Synchronous assert output: this runs with the kernel already wedged, so
+	 * the record has to reach the console before the watchdog reboot. */
+	BK_DUMP_OUT("psram_stack fatal: reason=%s(%u) core=%d task=%s stack=0x%08x\r\n",
+		pcPsramStackFatalReasonName(),
+		(unsigned int)ulPsramStackFatalReason,
+		(int)xPsramStackFatalCore,
+		(task_name != NULL) ? task_name : "<none>",
+		(unsigned int)ulPsramStackFatalStack);
+	bk_misc_set_reset_reason(RESET_SOURCE_CRASH_ASSERT);
+	bk_wdt_force_reboot();
+	__disable_irq();
+
+	for (;;) {
+	}
+}
+#endif
 
 /******************************************************
  *                   Enumerations
@@ -137,14 +177,49 @@ bk_err_t rtos_create_thread_with_affinity( beken_thread_t *thread, uint32_t affi
     }
 }
 
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+static bk_err_t rtos_create_noncache_psram_thread(
+	beken_thread_t *thread,
+	uint8_t priority,
+	const char *name,
+	beken_thread_function_t function,
+	uint32_t stack_size,
+	beken_thread_arg_t arg)
+{
+	if (priority > RTOS_HIGHEST_PRIORITY) {
+		priority = RTOS_HIGHEST_PRIORITY;
+	}
+
+	if (xTaskCreateInNoncachePsram(
+			(native_thread_t)function,
+			name,
+			(unsigned short)(stack_size / sizeof(portSTACK_TYPE)),
+			(void *)arg,
+			BK_PRIORITY_TO_NATIVE_PRIORITY(priority),
+			(TaskHandle_t *)thread,
+			tskNO_AFFINITY) == pdPASS) {
+		return kNoErr;
+	}
+	return kGeneralErr;
+}
+#endif
+
 // create task and set affinity to cpu0
 bk_err_t rtos_create_thread( beken_thread_t* thread, uint8_t priority, const char* name,
                         beken_thread_function_t function, uint32_t stack_size, beken_thread_arg_t arg )
 {
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+#if CONFIG_TASK_STACK_IN_PSRAM && CONFIG_PSRAM_AS_SYS_MEMORY
+    return rtos_create_noncache_psram_thread(thread, priority, name, function, stack_size, arg);
+#else
+    return rtos_create_thread_with_affinity(thread, tskNO_AFFINITY, priority, name, function, stack_size, arg);
+#endif
+#else
 #if CONFIG_TASK_STACK_IN_PSRAM && CONFIG_PSRAM_AS_SYS_MEMORY
     return rtos_create_psram_thread(thread, priority, name, function, stack_size, arg); 
 #else
     return rtos_create_thread_with_affinity(thread, tskNO_AFFINITY, priority, name, function, stack_size, arg);
+#endif
 #endif
 }
 
@@ -183,10 +258,18 @@ bk_err_t rtos_create_thread_static(beken_thread_t* thread,
 bk_err_t rtos_smp_create_thread( beken_thread_t* thread, uint8_t priority, const char* name,
                         beken_thread_function_t function, uint32_t stack_size, beken_thread_arg_t arg )
 {
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+#if CONFIG_TASK_STACK_IN_PSRAM && CONFIG_PSRAM_AS_SYS_MEMORY
+    return rtos_create_noncache_psram_thread(thread, priority, name, function, stack_size, arg);
+#else
+    return rtos_create_thread_with_affinity(thread, tskNO_AFFINITY, priority, name, function, stack_size, arg);
+#endif
+#else
 #if CONFIG_TASK_STACK_IN_PSRAM && CONFIG_PSRAM_AS_SYS_MEMORY
     return rtos_create_psram_thread(thread, priority, name, function, stack_size, arg); 
 #else
     return rtos_create_thread_with_affinity(thread, tskNO_AFFINITY, priority, name, function, stack_size, arg);
+#endif
 #endif
 }
 
