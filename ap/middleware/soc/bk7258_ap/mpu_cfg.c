@@ -17,6 +17,12 @@
 #include "common/bk_assert.h"
 #include "sdkconfig.h"
 
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+#if !defined(CONFIG_MPU) || !CONFIG_MPU
+#error "Cacheable PSRAM task stacks require MPU support"
+#endif
+#endif
+
 /*
 * #define ARM_MPU_RBAR(BASE, SH, RO, NP, XN)
 *
@@ -109,6 +115,24 @@ ARM_MPU_Region_t mpu_regions[] = {
 	 */
     { ARM_MPU_RBAR(0x40000000UL, ARM_MPU_SH_INNER, 0, 1, 1),
       ARM_MPU_RLAR(0x5FFFFFE0UL, 2) },
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK && CONFIG_DCACHE
+#if CONFIG_AP_PSRAM_STACK_HEAP_ADDR > CONFIG_PSRAM_BASE
+    { ARM_MPU_RBAR(CONFIG_PSRAM_BASE, ARM_MPU_SH_NON, 0, 1, 1),
+      ARM_MPU_RLAR(CONFIG_AP_PSRAM_STACK_HEAP_ADDR - 0x20UL, 1) },
+#endif
+
+    { ARM_MPU_RBAR(CONFIG_AP_PSRAM_STACK_HEAP_ADDR, ARM_MPU_SH_NON, 0, 1, 1),
+      ARM_MPU_RLAR(CONFIG_AP_PSRAM_STACK_HEAP_ADDR +
+                   CONFIG_AP_PSRAM_STACK_HEAP_SIZE - 0x20UL, 3) },
+
+#if (CONFIG_AP_PSRAM_STACK_HEAP_ADDR + CONFIG_AP_PSRAM_STACK_HEAP_SIZE) < \
+    (CONFIG_PSRAM_BASE + CONFIG_PSRAM_CAPACITY)
+    { ARM_MPU_RBAR(CONFIG_AP_PSRAM_STACK_HEAP_ADDR +
+                   CONFIG_AP_PSRAM_STACK_HEAP_SIZE,
+                   ARM_MPU_SH_NON, 0, 1, 1),
+      ARM_MPU_RLAR(CONFIG_PSRAM_BASE + CONFIG_PSRAM_CAPACITY - 0x20UL, 1) },
+#endif
+#else
 #if CONFIG_LV_CODE_LOAD_PSRAM
     { ARM_MPU_RBAR(0x60000000UL, ARM_MPU_SH_NON, 0, 1, 1),
       ARM_MPU_RLAR(0x608FFFE0UL, 1) },
@@ -123,6 +147,7 @@ ARM_MPU_Region_t mpu_regions[] = {
     { ARM_MPU_RBAR(0x60000000UL, ARM_MPU_SH_NON, 0, 1, 1),
       ARM_MPU_RLAR(0x63FFFFE0UL, 1) },
 #endif
+#endif
     /* MPU region 7 qspi0 */
     { ARM_MPU_RBAR(0x64000000UL, ARM_MPU_SH_NON, 0, 1, 1),
       ARM_MPU_RLAR(0x67FFFFE0UL, 1) },
@@ -135,6 +160,10 @@ ARM_MPU_Region_t mpu_regions[] = {
      { ARM_MPU_RBAR(0x6C000000UL, ARM_MPU_SH_NON, 0, 1, 1),
        ARM_MPU_RLAR(0xEFFFFFE0UL, 2) }
 };
+
+_Static_assert(
+    (sizeof(mpu_regions) / sizeof(mpu_regions[0])) <= 16U,
+    "MPU region count exceeds hardware capacity");
 
 /*
  For the star processor, only two combinations of these attributes are valid:Device-nGnRnE/Device-nGnRE

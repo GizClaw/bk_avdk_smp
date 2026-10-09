@@ -63,7 +63,7 @@ static volatile  pm_mailbox_communication_state_e s_pm_cp1_sleep_finish         
 static volatile  pm_mailbox_communication_state_e s_pm_cp1_cpu_freq_finish       = 0;
 static volatile  pm_mailbox_communication_state_e s_pm_cp1_init                  = 0;
 static volatile  pm_mailbox_communication_state_e s_pm_external_ldo_ctrl         = 0;
-static volatile  pm_mailbox_communication_state_e s_pm_psram_power_ctrl          = 0;
+static volatile  bk_err_t                         s_pm_psram_power_result        = BK_FAIL;
 static volatile  pm_mailbox_communication_state_e s_pm_cp2_rtc_deepsleep_finish  = 0;
 static volatile  pm_mailbox_communication_state_e s_pm_ap_get_cp_data_finish     = 0;
 static volatile  pm_mailbox_communication_state_e s_pm_cp2_ctrl_state_finish     = 0;
@@ -73,6 +73,58 @@ static volatile  pm_mailbox_communication_state_e s_pm_cp2_wakeup_src_cfg_finish
 static mb_chnl_cmd_t                              s_pm_mb_data                   = {0};
 
 static volatile  uint32_t                         s_pm_cp1_boot_try_count        = 0;
+
+typedef enum {
+	PM_PSRAM_PROXY_IDLE = 0,
+	PM_PSRAM_PROXY_PREPARING,
+	PM_PSRAM_PROXY_WAIT_ACK,
+	PM_PSRAM_PROXY_WAITING = PM_PSRAM_PROXY_WAIT_ACK,
+	PM_PSRAM_PROXY_QUARANTINE,
+	PM_PSRAM_PROXY_TIMED_OUT = PM_PSRAM_PROXY_QUARANTINE,
+	PM_PSRAM_PROXY_DONE,
+} pm_psram_proxy_state_e;
+
+static uint32_t s_pm_psram_proxy_state = PM_PSRAM_PROXY_IDLE;
+static uint32_t s_pm_psram_proxy_request = UINT32_MAX;
+
+typedef enum {
+	PM_PSRAM_STACK_IDLE = 0,
+	PM_PSRAM_STACK_PREPARING,
+	PM_PSRAM_STACK_WAITING,
+	PM_PSRAM_STACK_TIMED_OUT,
+	PM_PSRAM_STACK_DONE,
+} pm_psram_stack_proxy_state_e;
+
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+typedef enum {
+	PM_PSRAM_STACK_UNSYNCED = 0,
+	PM_PSRAM_STACK_RELEASED,
+	PM_PSRAM_STACK_ACTIVE,
+	PM_PSRAM_STACK_LOCKED_OUT,
+} pm_psram_stack_stable_state_e;
+#endif
+
+static uint32_t s_pm_psram_stack_state
+	__attribute__((section(".dtcm_sec_data.noncache_sram"))) =
+	PM_PSRAM_STACK_IDLE;
+static uint32_t s_pm_psram_stack_request_id
+	__attribute__((section(".dtcm_sec_data.noncache_sram")));
+static uint32_t s_pm_psram_stack_request_generation
+	__attribute__((section(".dtcm_sec_data.noncache_sram")));
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+static uint32_t s_pm_psram_stack_request_sleep_state
+	__attribute__((section(".dtcm_sec_data.noncache_sram")));
+static uint32_t s_pm_psram_stack_source_stable
+	__attribute__((section(".dtcm_sec_data.noncache_sram"))) =
+	PM_PSRAM_STACK_UNSYNCED;
+static uint32_t s_pm_psram_stack_stable_state
+	__attribute__((section(".dtcm_sec_data.noncache_sram"))) =
+	PM_PSRAM_STACK_UNSYNCED;
+#endif
+static bk_err_t s_pm_psram_stack_result
+	__attribute__((section(".dtcm_sec_data.noncache_sram"))) = BK_FAIL;
+static bool s_pm_psram_stack_locked_out
+	__attribute__((section(".dtcm_sec_data.noncache_sram")));
 
 /*=====================VARIABLE  SECTION  END=================*/
 
@@ -234,13 +286,343 @@ bk_err_t bk_pm_cp1_external_ldo_ctrl_state_set(pm_mailbox_communication_state_e 
 	s_pm_external_ldo_ctrl = state;
 	return BK_OK;
 }
+static bk_err_t pm_psram_proxy_begin(uint32_t request)
+{
+	uint32_t expected = PM_PSRAM_PROXY_IDLE;
+
+	if (!__atomic_compare_exchange_n(
+			&s_pm_psram_proxy_state, &expected,
+			PM_PSRAM_PROXY_PREPARING, false,
+			__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		return BK_FAIL;
+	}
+	__atomic_store_n(
+		&s_pm_psram_proxy_request, request, __ATOMIC_RELAXED);
+	s_pm_psram_power_result = BK_FAIL;
+	__atomic_store_n(
+		&s_pm_psram_proxy_state,
+		PM_PSRAM_PROXY_WAIT_ACK, __ATOMIC_RELEASE);
+	return BK_OK;
+}
+
+static void pm_psram_proxy_cancel(void)
+{
+	uint32_t expected = PM_PSRAM_PROXY_WAIT_ACK;
+
+	__atomic_store_n(
+		&s_pm_psram_proxy_request, UINT32_MAX, __ATOMIC_RELEASE);
+	bool cleared = __atomic_compare_exchange_n(
+		&s_pm_psram_proxy_state, &expected,
+		PM_PSRAM_PROXY_IDLE, false,
+		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+	if (!cleared && (expected == PM_PSRAM_PROXY_DONE)) {
+		(void)__atomic_compare_exchange_n(
+			&s_pm_psram_proxy_state, &expected,
+			PM_PSRAM_PROXY_IDLE, false,
+			__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+	}
+}
+
+static bk_err_t pm_psram_proxy_timeout(void)
+{
+	uint32_t expected = PM_PSRAM_PROXY_WAIT_ACK;
+
+	if (__atomic_compare_exchange_n(
+			&s_pm_psram_proxy_state, &expected,
+			PM_PSRAM_PROXY_QUARANTINE, false,
+			__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		return BK_FAIL;
+	}
+	return expected == PM_PSRAM_PROXY_DONE ? BK_OK : BK_FAIL;
+}
+
+static void pm_psram_proxy_ack(bk_err_t result)
+{
+	uint32_t expected = PM_PSRAM_PROXY_QUARANTINE;
+
+	if (__atomic_load_n(
+			&s_pm_psram_proxy_state, __ATOMIC_ACQUIRE)
+		== PM_PSRAM_PROXY_QUARANTINE) {
+		__atomic_store_n(
+			&s_pm_psram_proxy_request, UINT32_MAX, __ATOMIC_RELEASE);
+	}
+	if (__atomic_compare_exchange_n(
+			&s_pm_psram_proxy_state, &expected,
+			PM_PSRAM_PROXY_IDLE, false,
+			__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		return;
+	}
+	if (expected != PM_PSRAM_PROXY_WAIT_ACK) {
+		return;
+	}
+	s_pm_psram_power_result = result;
+	if (!__atomic_compare_exchange_n(
+		&s_pm_psram_proxy_state, &expected,
+		PM_PSRAM_PROXY_DONE, false,
+		__ATOMIC_RELEASE, __ATOMIC_ACQUIRE)
+		&& (expected == PM_PSRAM_PROXY_QUARANTINE)) {
+		__atomic_store_n(
+			&s_pm_psram_proxy_request, UINT32_MAX, __ATOMIC_RELEASE);
+		(void)__atomic_compare_exchange_n(
+			&s_pm_psram_proxy_state, &expected,
+			PM_PSRAM_PROXY_IDLE, false,
+			__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+	}
+}
+
+static bk_err_t pm_psram_proxy_complete(void)
+{
+	const bk_err_t local_result = s_pm_psram_power_result;
+
+	__atomic_store_n(
+		&s_pm_psram_proxy_request, UINT32_MAX, __ATOMIC_RELEASE);
+	__atomic_store_n(
+		&s_pm_psram_proxy_state, PM_PSRAM_PROXY_IDLE, __ATOMIC_RELEASE);
+	return local_result;
+}
+
+static bk_err_t pm_psram_stack_begin(
+	uint32_t sleep_state, uint32_t *request_id)
+{
+	uint32_t expected = PM_PSRAM_STACK_IDLE;
+	uint32_t generation;
+
+	if (__atomic_load_n(
+			&s_pm_psram_stack_locked_out, __ATOMIC_ACQUIRE)
+		|| !__atomic_compare_exchange_n(
+			&s_pm_psram_stack_state, &expected,
+			PM_PSRAM_STACK_PREPARING, false,
+			__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		return BK_FAIL;
+	}
+	generation = __atomic_load_n(
+		&s_pm_psram_stack_request_generation, __ATOMIC_ACQUIRE);
+	/* s_pm_psram_stack_request_generation == UINT32_MAX is checked atomically. */
+	if (generation == UINT32_MAX) {
+		__atomic_store_n(
+			&s_pm_psram_stack_locked_out, true, __ATOMIC_RELEASE);
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+		__atomic_store_n(
+			&s_pm_psram_stack_stable_state,
+			PM_PSRAM_STACK_LOCKED_OUT, __ATOMIC_RELEASE);
+#endif
+		__atomic_store_n(
+			&s_pm_psram_stack_state,
+			PM_PSRAM_STACK_IDLE, __ATOMIC_RELEASE);
+		return BK_FAIL;
+	}
+	generation++;
+	__atomic_store_n(
+		&s_pm_psram_stack_request_generation,
+		generation, __ATOMIC_RELEASE);
+	*request_id = generation;
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+	__atomic_store_n(
+		&s_pm_psram_stack_source_stable,
+		__atomic_load_n(
+			&s_pm_psram_stack_stable_state, __ATOMIC_ACQUIRE),
+		__ATOMIC_RELAXED);
+	__atomic_store_n(
+		&s_pm_psram_stack_request_sleep_state,
+		sleep_state, __ATOMIC_RELAXED);
+#else
+	(void)sleep_state;
+#endif
+	__atomic_store_n(
+		&s_pm_psram_stack_request_id, *request_id, __ATOMIC_RELAXED);
+	__atomic_store_n(
+		&s_pm_psram_stack_result, BK_FAIL, __ATOMIC_RELAXED);
+	__atomic_store_n(
+		&s_pm_psram_stack_state,
+		PM_PSRAM_STACK_WAITING, __ATOMIC_RELEASE);
+	return BK_OK;
+}
+
+static uint32_t pm_psram_stack_quarantine(void)
+{
+	uint32_t expected = PM_PSRAM_STACK_WAITING;
+
+	if (__atomic_compare_exchange_n(
+		&s_pm_psram_stack_state, &expected,
+		PM_PSRAM_STACK_TIMED_OUT, false,
+		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		return PM_PSRAM_STACK_WAITING;
+	}
+	return expected;
+}
+
+static void pm_psram_stack_ack(uint32_t request_id, bk_err_t result)
+{
+	uint32_t expected;
+
+	if (__atomic_load_n(
+			&s_pm_psram_stack_request_id, __ATOMIC_ACQUIRE)
+		!= request_id) {
+		return;
+	}
+	expected = PM_PSRAM_STACK_WAITING;
+	__atomic_store_n(
+		&s_pm_psram_stack_result, result, __ATOMIC_RELAXED);
+	if (__atomic_compare_exchange_n(
+			&s_pm_psram_stack_state, &expected,
+			PM_PSRAM_STACK_DONE, false,
+			__ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+		return;
+	}
+	if (expected == PM_PSRAM_STACK_TIMED_OUT) {
+		/* A matching late ACK only clears the quarantined request. */
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+		__atomic_store_n(
+			&s_pm_psram_stack_stable_state,
+			PM_PSRAM_STACK_UNSYNCED, __ATOMIC_RELEASE);
+#endif
+		__atomic_store_n(
+			&s_pm_psram_stack_request_id, 0U, __ATOMIC_RELEASE);
+		(void)__atomic_compare_exchange_n(
+			&s_pm_psram_stack_state, &expected,
+			PM_PSRAM_STACK_IDLE, false,
+			__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+	}
+}
+
+static bk_err_t pm_psram_stack_complete(void)
+{
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+	uint32_t expected = PM_PSRAM_STACK_DONE;
+	bk_err_t result;
+	uint32_t stable_state;
+
+	if (!__atomic_compare_exchange_n(
+			&s_pm_psram_stack_state, &expected,
+			PM_PSRAM_STACK_PREPARING, false,
+			__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		return BK_FAIL;
+	}
+	result = __atomic_load_n(
+		&s_pm_psram_stack_result, __ATOMIC_ACQUIRE);
+	stable_state = __atomic_load_n(
+		&s_pm_psram_stack_source_stable, __ATOMIC_ACQUIRE);
+	if (result == BK_OK) {
+		stable_state = __atomic_load_n(
+			&s_pm_psram_stack_request_sleep_state,
+			__ATOMIC_ACQUIRE) == 0U
+			? PM_PSRAM_STACK_ACTIVE : PM_PSRAM_STACK_RELEASED;
+	}
+	__atomic_store_n(
+		&s_pm_psram_stack_stable_state,
+		stable_state, __ATOMIC_RELEASE);
+#else
+	const bk_err_t result = s_pm_psram_stack_result;
+#endif
+	__atomic_store_n(
+		&s_pm_psram_stack_request_id, 0U, __ATOMIC_RELEASE);
+	__atomic_store_n(
+		&s_pm_psram_stack_state,
+		PM_PSRAM_STACK_IDLE, __ATOMIC_RELEASE);
+	return result;
+}
+
+bk_err_t bk_pm_psram_stack_vote_sleep_ctrl(uint32_t sleep_state)
+{
+	uint64_t start;
+	uint32_t request_id;
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+	const uint32_t desired_stable = sleep_state == 0U
+		? PM_PSRAM_STACK_ACTIVE : PM_PSRAM_STACK_RELEASED;
+	uint64_t admission_begin;
+#endif
+
+	if (sleep_state > 1U) {
+		return BK_FAIL;
+	}
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+	admission_begin = pm_cp1_aon_rtc_counter_get();
+	for (;;) {
+		if ((__atomic_load_n(
+				&s_pm_psram_stack_state, __ATOMIC_ACQUIRE)
+				== PM_PSRAM_STACK_IDLE)
+			&& (__atomic_load_n(
+				&s_pm_psram_stack_stable_state, __ATOMIC_ACQUIRE)
+				== desired_stable)) {
+			return BK_OK;
+		}
+		if (__atomic_load_n(
+				&s_pm_psram_stack_state, __ATOMIC_ACQUIRE)
+			== PM_PSRAM_STACK_DONE) {
+			const bk_err_t adopted_result = pm_psram_stack_complete();
+
+			if ((adopted_result != BK_OK)
+				|| (__atomic_load_n(
+					&s_pm_psram_stack_stable_state,
+					__ATOMIC_ACQUIRE) == desired_stable)) {
+				return adopted_result;
+			}
+		}
+		if (pm_psram_stack_begin(sleep_state, &request_id) == BK_OK) {
+			break;
+		}
+		/* The proxy admits one transaction at a time. Losing that race to a
+		 * peer core is not a resource failure, and the caller (task creation)
+		 * would surface it as out of memory, so wait for the in-flight request
+		 * to settle and re-evaluate against the stable state instead. */
+		if (__atomic_load_n(
+				&s_pm_psram_stack_locked_out, __ATOMIC_ACQUIRE)
+			|| (__atomic_load_n(
+				&s_pm_psram_stack_state, __ATOMIC_ACQUIRE)
+				== PM_PSRAM_STACK_TIMED_OUT)) {
+			return BK_FAIL;
+		}
+		if ((pm_cp1_aon_rtc_counter_get() - admission_begin)
+			>= (PM_SEND_CMD_CP1_RESPONSE_TIEM
+				* PM_AON_RTC_DEFAULT_TICK_COUNT)) {
+			return BK_FAIL;
+		}
+	}
+#else
+	if (pm_psram_stack_begin(sleep_state, &request_id) != BK_OK) {
+		return BK_FAIL;
+	}
+#endif
+	if (pm_cp1_mailbox_send_data(
+			PM_PSRAM_STACK_SLEEP_CTRL_CMD,
+			PM_SLEEP_MODULE_NAME_PSRAM,
+			sleep_state, request_id) != BK_OK) {
+		__atomic_store_n(
+			&s_pm_psram_stack_request_id, 0U, __ATOMIC_RELEASE);
+		__atomic_store_n(
+			&s_pm_psram_stack_state,
+			PM_PSRAM_STACK_IDLE, __ATOMIC_RELEASE);
+		return BK_FAIL;
+	}
+	start = pm_cp1_aon_rtc_counter_get();
+	while ((pm_cp1_aon_rtc_counter_get() - start)
+		< (PM_SEND_CMD_CP1_RESPONSE_TIEM
+			* PM_AON_RTC_DEFAULT_TICK_COUNT)) {
+		if (__atomic_load_n(
+				&s_pm_psram_stack_state,
+				__ATOMIC_ACQUIRE) == PM_PSRAM_STACK_DONE) {
+			return pm_psram_stack_complete();
+		}
+	}
+	if (pm_psram_stack_quarantine() == PM_PSRAM_STACK_DONE) {
+		return pm_psram_stack_complete();
+	}
+	return BK_FAIL;
+}
+
 pm_mailbox_communication_state_e bk_pm_cp1_psram_power_state_get()
 {
-	return s_pm_psram_power_ctrl;
+	return __atomic_load_n(
+		&s_pm_psram_proxy_state, __ATOMIC_ACQUIRE)
+		== PM_PSRAM_PROXY_DONE;
 }
+
 bk_err_t bk_pm_cp1_psram_power_state_set(pm_mailbox_communication_state_e state)
 {
-	s_pm_psram_power_ctrl = state;
+	__atomic_store_n(
+		&s_pm_psram_proxy_state,
+		state ? PM_PSRAM_PROXY_DONE : PM_PSRAM_PROXY_IDLE,
+		__ATOMIC_RELEASE);
 	return BK_OK;
 }
 pm_mailbox_communication_state_e bk_pm_cp1_ctrl_state_get()
@@ -323,6 +705,10 @@ static void pm_cp1_mailbox_rx_isr(int *pm_mb, mb_chnl_cmd_t *cmd_buf)
 				ret = BK_FAIL;
 			}
 			break;
+		case PM_PSRAM_STACK_SLEEP_CTRL_CMD:
+			pm_psram_stack_ack(
+				cmd_buf->param1, (bk_err_t)cmd_buf->param2);
+			break;
 		 case PM_CPU_FREQ_CTRL_CMD:
 			if(cmd_buf->param1 == BK_OK)
 			{
@@ -343,24 +729,21 @@ static void pm_cp1_mailbox_rx_isr(int *pm_mb, mb_chnl_cmd_t *cmd_buf)
 				ret = BK_FAIL;
 			}
 			break;
-		case PM_CTRL_PSRAM_POWER_CMD:
-			if(cmd_buf->param1 == PM_POWER_MODULE_STATE_ON)
-			{
-				msg.event= PM_AP_CORE_PSRAM_STATE_NOTIFY;
-				msg.param1 = PM_AP_PSRAM_POWER_ON;//cmd_buf->param1;
-				msg.param2 = cmd_buf->param2;
-				bk_pm_ap_core_send_msg(&msg);
+		case PM_CTRL_PSRAM_POWER_CMD: {
+			const uint32_t state = __atomic_load_n(
+				&s_pm_psram_proxy_state, __ATOMIC_ACQUIRE);
+			if ((state == PM_PSRAM_PROXY_PREPARING)
+				|| (state == PM_PSRAM_PROXY_IDLE)) {
+			} else if ((__atomic_load_n(
+						&s_pm_psram_proxy_request, __ATOMIC_ACQUIRE)
+					== cmd_buf->param1)
+				&& ((state == PM_PSRAM_PROXY_WAIT_ACK)
+					|| (state == PM_PSRAM_PROXY_QUARANTINE))) {
+				s_pm_psram_power_result = cmd_buf->param2;
+				pm_psram_proxy_ack(cmd_buf->param2);
 			}
-			else if(cmd_buf->param1 ==PM_POWER_MODULE_STATE_OFF)
-			{
-
-			}
-			else
-			{
-				ret = BK_FAIL;
-			}
-			s_pm_psram_power_ctrl = PM_MAILBOX_COMMUNICATION_FINISH;
 			break;
+		}
 		case PM_CP1_PSRAM_MALLOC_STATE_CMD:
 			if(cmd_buf->param1 == PM_AP_PSRAM_POWER_OFF)//recovery resource in ap when psram power off in cp
 			{
@@ -456,43 +839,48 @@ static void pm_cp1_mailbox_init()
 
 bk_err_t bk_pm_module_vote_psram_ctrl(pm_power_psram_module_name_e module,pm_power_module_state_e power_state)
 {
-
 #if CONFIG_MAILBOX
 	uint64_t previous_tick  = 0;
 	uint64_t current_tick   = 0;
-	bk_err_t ret            =  BK_OK;
-	bk_pm_cp1_psram_power_state_set(PM_MAILBOX_COMMUNICATION_INIT);
+	bk_err_t ret;
 
-    ret = pm_cp1_mailbox_send_data(PM_CTRL_PSRAM_POWER_CMD, module,power_state,0);
-    if(ret != BK_OK)
-    {
-        return BK_FAIL;
-    }
-
+	if (pm_psram_proxy_begin(power_state) != BK_OK) {
+		return BK_FAIL;
+	}
+	ret = pm_cp1_mailbox_send_data(PM_CTRL_PSRAM_POWER_CMD, module,power_state,0);
+	if(ret != BK_OK) {
+		pm_psram_proxy_cancel();
+		return BK_FAIL;
+	}
 	previous_tick = pm_cp1_aon_rtc_counter_get();
 	current_tick = previous_tick;
-	while((current_tick - previous_tick) < (PM_SEND_CMD_CP1_RESPONSE_TIEM*PM_AON_RTC_DEFAULT_TICK_COUNT))
-	{
-	    if (bk_pm_cp1_psram_power_state_get()) // wait the cp0 response
-	    {
+	while((current_tick - previous_tick)
+		< (PM_SEND_CMD_CP1_RESPONSE_TIEM*PM_AON_RTC_DEFAULT_TICK_COUNT)) {
+		if (bk_pm_cp1_psram_power_state_get()) {
 			break;
-	    }
-	    current_tick = pm_cp1_aon_rtc_counter_get();
+		}
+		current_tick = pm_cp1_aon_rtc_counter_get();
 	}
-
-	if(!bk_pm_cp1_psram_power_state_get())
-	{
-	    LOGE("cp1 get psram state time out\r\n");
+	if(!bk_pm_cp1_psram_power_state_get()) {
+		if (pm_psram_proxy_timeout() != BK_OK) {
+			LOGE("cp1 get psram state time out\r\n");
+			return BK_FAIL;
+		}
 	}
-
-	if(power_state == PM_POWER_MODULE_STATE_ON)
-	{
+	if(s_pm_psram_power_result != BK_OK) {
+		ret = pm_psram_proxy_complete();
+		return BK_FAIL;
+	}
+	ret = pm_psram_proxy_complete();
+	if(ret != BK_OK) {
+		return BK_FAIL;
+	}
+	if(power_state == PM_POWER_MODULE_STATE_ON) {
 		bk_pm_ap_psram_power_state_handle_callback(module,power_state);
 	}
 	LOGD("Ap vote psram_P E\r\n");
 #endif
 	return BK_OK;
-
 }
 
 bk_err_t bk_pm_module_vote_ctrl_external_ldo(uint32_t module,gpio_id_t gpio_id,gpio_output_state_e value)

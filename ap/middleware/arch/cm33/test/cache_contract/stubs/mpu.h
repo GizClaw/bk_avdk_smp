@@ -1,0 +1,4 @@
+#ifndef CACHE_CONTRACT_TEST_MPU_H
+#define CACHE_CONTRACT_TEST_MPU_H
+
+#endif
