@@ -614,9 +614,22 @@ bk_err_t bk_lcd_set_partical_display(bool en, uint16_t partial_clum_l, uint16_t 
 	lcd_hal_set_partical_display(en, partial_clum_l, partial_clum_r, partial_line_l, partial_line_r);
 	return BK_OK;
 }
-uint32_t bk_lcd_rgb_ver_cnt_get(void)
+uint16_t bk_vsync_back_porch = 0;
+uint16_t bk_vsync_front_porch = 0;
+uint16_t bk_height = 0;
+uint32_t bk_lcd_rgb_is_scan_active(void)
 {
-    return lcd_hal_get_status_ver_cnt_status();
+    uint32_t rgb_ver_cnt = lcd_hal_get_status_ver_cnt_status();
+
+    if (bk_height == 0) {
+        return rgb_ver_cnt;
+    }
+
+    if (rgb_ver_cnt > 0 && rgb_ver_cnt < ((bk_height + bk_vsync_back_porch + bk_vsync_front_porch) * 7 / 8)) {
+        return 1;
+    }
+
+    return 0;
 }
 
 #if CONFIG_FLASH
@@ -628,14 +641,20 @@ void lcd_flash_disable_int(uint32_t enable)
     if(enable)
     {
         //check display flush status (vsync cnt) is flushing or not, when vsync_pulse_width timing cnt==0
-        if (bk_lcd_rgb_ver_cnt_get() == 0)
+        if (bk_lcd_rgb_is_scan_active() == 0)
         {
             //if not flush, delay 90us (need bigger then vsync_pulse_width times),recheck
-            delay(20);
+            uint32_t cnt = 0;
+            do {
+                delay(20);
+                cnt++;
+                if (bk_lcd_rgb_is_scan_active() != 0)
+                    break;
+            } while (cnt < 200);
             //recheck flush status ,display is also not workking, to reset display
-            if (bk_lcd_rgb_ver_cnt_get() == 0)
+            if (bk_lcd_rgb_is_scan_active() == 0)
             {
-                LOGD(" %s softreset display %d\n", __func__, bk_lcd_rgb_ver_cnt_get());
+                LOGD(" %s softreset display %d\n", __func__, lcd_hal_get_status_ver_cnt_status());
                 lcd_disp_ll_set_module_control_soft_reset(0);
                 delay(10);
                 lcd_disp_ll_set_module_control_soft_reset(1);
@@ -690,6 +709,10 @@ bk_err_t bk_lcd_rgb_init(const lcd_device_t *device)
 	                        rgb->hsync_front_porch,
 	                        rgb->vsync_back_porch,
 	                        rgb->vsync_front_porch);
+#if CONFIG_FLASH
+	bk_vsync_back_porch = rgb->vsync_back_porch;
+	bk_vsync_front_porch = rgb->vsync_front_porch;
+#endif
 
 	lcd_hal_set_rgb_clk_rev_edge(rgb->data_out_clk_edge);//output data is in clk doen edge or up adge
 
@@ -809,6 +832,9 @@ void lcd_driver_ppi_set(uint16_t width, uint16_t height)
 {
 	uint16_t x = s_lcd.device.width;
 	uint16_t y = s_lcd.device.height;
+#if CONFIG_FLASH
+	bk_height = height;
+#endif
 
 	//bk_lcd_set_partical_display(0, 0, 0, 0, 0);
 	lcd_hal_pixel_config(width, height);
