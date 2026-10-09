@@ -36,6 +36,13 @@ def resolve_project_dir():
 project_abs_dir = resolve_project_dir()
 
 
+def python_cmd(script, *args):
+    """Windows cannot exec a .py by shebang; always spawn via the interpreter."""
+    py = sys.executable if sys.executable else 'python3'
+    extra = ' '.join(args)
+    return f'"{py}" "{script}" {extra}'.strip()
+
+
 def run_cmd(cmd):
     p = subprocess.Popen(cmd, shell=True)
     ret = p.wait()
@@ -113,7 +120,7 @@ def pack(prebuild):
     copy_file(f'{project_partitions_cfg_dir}/pack.json', f'{_BUILD_DIR}/pack.json')
 
     if prebuild:
-        run_cmd(f'{BK_UTILS_TOOL} gen all --debug')
+        run_cmd(python_cmd(BK_UTILS_TOOL, 'gen all --debug'))
         cwd = os.getcwd()
         copy_file(f'{cwd}/partitions_partition.h', f'{cwd}/partitions_gen.h')
         os.chdir(saved_cur_dir)
@@ -153,7 +160,7 @@ def pack(prebuild):
         logging.error(f'bl2.bin not found under {TFM_BIN_DIR}')
         exit(1)
 
-    run_cmd(f'{BK_UTILS_TOOL} pack all --debug')
+    run_cmd(python_cmd(BK_UTILS_TOOL, 'pack all --debug'))
 
     os.makedirs(CMAKE_INSTALL_DIR, exist_ok=True)
     copy_file(f'{_BUILD_DIR}/ota.bin', f'{CMAKE_INSTALL_DIR}/ota.bin')

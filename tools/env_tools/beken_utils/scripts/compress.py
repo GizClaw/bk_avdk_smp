@@ -31,8 +31,7 @@ def compress_bin(infile, outfile):
                 break
             file_in.seek(0)
             file_in.write(chunk)
-            script_dir = get_script_dir()
-            compress_tool = f'{script_dir}/../tools/packager_tools/lzma'
+            compress_tool = get_compress_tool_exe()
             cmd =f'{compress_tool} e {compress_temp_in} {compress_temp_out}'
             run_cmd(cmd)
             chunk = bytes() # clear chunk
