@@ -1177,8 +1177,8 @@ bool sys_hal_set_cp_sleep_vote_and_check_subcores_enter_wfi()
 	uint64_t current_tick  = 0;
 
 	if(bk_pm_low_vol_vote_state_get() &&
-	(FIXED_ADDR_PM_AP_SLEEP_VOTE == 0)&&
-	(FIXED_ADDR_PM_AP_CLK_VOTE_STATE == 0)&&
+	pm_shared_u64_is_zero(&FIXED_ADDR_PM_AP_SLEEP_VOTE) &&
+	pm_shared_u64_is_zero(&FIXED_ADDR_PM_AP_CLK_VOTE_STATE) &&
 	(bk_pm_cp_mb_busy() == 0))
 	{
 		aon_pmu_ll_set_r3_cp0_sleep_vote_state(1);
@@ -1215,8 +1215,8 @@ bool sys_hal_set_cp_sleep_vote_and_check_subcores_enter_wfi()
 
 		if (aon_pmu_ll_get_r3_cp1_enter_wfi_state() &&
 			aon_pmu_ll_get_r3_cp2_enter_wfi_state() &&
-			(FIXED_ADDR_PM_AP_SLEEP_VOTE == 0) &&
-			(FIXED_ADDR_PM_AP_CLK_VOTE_STATE == 0) &&
+			pm_shared_u64_is_zero(&FIXED_ADDR_PM_AP_SLEEP_VOTE) &&
+			pm_shared_u64_is_zero(&FIXED_ADDR_PM_AP_CLK_VOTE_STATE) &&
 			(bk_pm_cp_mb_busy() == 0))
 		{
 			ret = true;
@@ -1557,6 +1557,6 @@ void sys_hal_low_power_hardware_init()
 	FIXED_ADDR_WAKEUP_AP1_COUNT     = 0x0;
 	FIXED_ADDR_WAKEUP_AP1_DEBUG     = 0x0;
 
-	FIXED_ADDR_PM_AP_SLEEP_VOTE     = 0x0;
-	FIXED_ADDR_PM_AP_CLK_VOTE_STATE = 0x0;
+	(void)pm_shared_u64_store(&FIXED_ADDR_PM_AP_SLEEP_VOTE, 0U);
+	(void)pm_shared_u64_store(&FIXED_ADDR_PM_AP_CLK_VOTE_STATE, 0U);
 }

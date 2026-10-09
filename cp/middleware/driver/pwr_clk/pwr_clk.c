@@ -214,6 +214,11 @@ static void pm_cp0_mailbox_rx_isr(int *pm_mb, mb_chnl_cmd_t *cmd_buf)
 			//bk_pm_cp0_response_cp1(PM_SLEEP_CTRL_CMD,BK_OK,0,0);//for more quick when enter lv
 			ret = pm_cp0_send_msg(LOW_PWR_CORE_SLEEP_CTRL, cmd_buf->param1,cmd_buf->param2,cmd_buf->param3);
 			break;
+		case PM_PSRAM_STACK_SLEEP_CTRL_CMD:
+			ret = pm_cp0_send_msg(
+				LOW_PWR_CORE_PSRAM_STACK_SLEEP,
+				cmd_buf->param1, cmd_buf->param2, cmd_buf->param3);
+			break;
 		case PM_CPU_FREQ_CTRL_CMD:
 			ret = pm_cp0_send_msg(LOW_PWR_CORE_FREQ_CTRL, cmd_buf->param1,cmd_buf->param2,cmd_buf->param3);
 			break;
@@ -627,63 +632,68 @@ bk_err_t bk_pm_module_vote_boot_cp2_ctrl(pm_boot_cp2_module_name_e module,pm_pow
 #if CONFIG_PSRAM
 static uint32_t s_pm_psram_ctrl_state     = 0;
 
+static void pm_psram_power_off(pm_power_psram_module_name_e module)
+{
+	GLOBAL_INT_DECLARATION();
+
+	if ((s_pm_psram_ctrl_state & (0x1U << module)) == 0U) {
+		return;
+	}
+	GLOBAL_INT_DISABLE();
+	s_pm_psram_ctrl_state &= ~(0x1U << module);
+	GLOBAL_INT_RESTORE();
+#if !CONFIG_PM_PSRAM_FORCE_ON
+	if (s_pm_psram_ctrl_state == 0U) {
+		bk_psram_deinit();
+		bk_pm_module_vote_vdddig_ctrl(
+			PM_VDDDIG_MODULE_PSRAM, PM_VDDDIG_HIGH_STATE_OFF);
+		FIXED_ADDR_PSRAM_POWER_DOWN = PM_PSRAM_POWER_DOWN_MAGIC;
+		bk_pm_get_cp1_psram_malloc_count(0x1);
+	}
 #endif
+}
+#endif
+
 static bk_err_t pm_psram_power_ctrl(pm_power_psram_module_name_e module,pm_power_module_state_e power_state)
 {
-#if CONFIG_PSRAM
 	bk_err_t ret = BK_OK;
+#if CONFIG_PSRAM
 	GLOBAL_INT_DECLARATION();
-	//BK_LOGD(NULL,"%s %d %d 0x%x\r\n",__func__, module, power_state,s_pm_psram_ctrl_state);
-    if(power_state == PM_POWER_MODULE_STATE_ON)//power on
-    {
-		if(s_pm_psram_ctrl_state == 0)
-		{
-			bk_pm_module_vote_vdddig_ctrl(PM_VDDDIG_MODULE_PSRAM,PM_VDDDIG_HIGH_STATE_ON);
+
+	if(power_state == PM_POWER_MODULE_STATE_ON) {
+		const bool was_off = s_pm_psram_ctrl_state == 0U;
+
+		if(was_off) {
+			bk_pm_module_vote_vdddig_ctrl(
+				PM_VDDDIG_MODULE_PSRAM, PM_VDDDIG_HIGH_STATE_ON);
 		}
 		ret = bk_psram_init();
-		if(ret != BK_OK)
-		{
+		if(ret != BK_OK) {
 			LOGE("Psram_I err0:%d",ret);
 			bk_psram_deinit();
 			ret = bk_psram_init();
-			if(ret != BK_OK)
-			{
-				LOGE("Psram_I err1:%d",ret);
-				bk_psram_deinit();
-				ret = bk_psram_init();
-				if(ret != BK_OK)
-				{
-					LOGE("Psram_I err2:%d",ret);
-					#if CONFIG_WDT_EN
-					bk_wdt_force_reboot();//try 3 times, if fail ,reboot.
-					#endif
-				}
-			}
 		}
-		GLOBAL_INT_DISABLE();
-        s_pm_psram_ctrl_state |= 0x1 << (module);
-        GLOBAL_INT_RESTORE();
-	}
-    else //power down
-    {
-		if(s_pm_psram_ctrl_state&(0x1 << (module)))
-		{
+		if(ret != BK_OK) {
+			LOGE("Psram_I err1:%d",ret);
+			bk_psram_deinit();
+			ret = bk_psram_init();
+		}
+		if(ret == BK_OK) {
 			GLOBAL_INT_DISABLE();
-			s_pm_psram_ctrl_state &= ~(0x1 << (module));
+			s_pm_psram_ctrl_state |= 0x1U << module;
 			GLOBAL_INT_RESTORE();
-			#if !CONFIG_PM_PSRAM_FORCE_ON
-			if(0x0 == s_pm_psram_ctrl_state)
-			{
-				bk_psram_deinit();
-				bk_pm_module_vote_vdddig_ctrl(PM_VDDDIG_MODULE_PSRAM,PM_VDDDIG_HIGH_STATE_OFF);
-				FIXED_ADDR_PSRAM_POWER_DOWN = PM_PSRAM_POWER_DOWN_MAGIC;
-                bk_pm_get_cp1_psram_malloc_count(0x1);
+		} else {
+			LOGE("Psram_I err2:%d",ret);
+			if(was_off) {
+				bk_pm_module_vote_vdddig_ctrl(
+					PM_VDDDIG_MODULE_PSRAM, PM_VDDDIG_HIGH_STATE_OFF);
 			}
-			#endif
 		}
+		return ret;
 	}
+	pm_psram_power_off(module);
 #endif
- 	return BK_OK;
+	return ret;
 }
 
 bk_err_t pm_debug_pwr_clk_state()

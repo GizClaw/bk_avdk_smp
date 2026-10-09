@@ -216,7 +216,8 @@ static bk_err_t low_pwr_core_message_handle(void)
 				case LOW_PWR_CORE_PSRAM_POWER:
 				{
 					ret = bk_pm_module_vote_psram_ctrl(msg.param1,msg.param2);
-					bk_pm_cp0_response_cp1(PM_CTRL_PSRAM_POWER_CMD, msg.param2,0,0);
+					bk_pm_cp0_response_cp1(
+						PM_CTRL_PSRAM_POWER_CMD, msg.param2,ret,0);
 				}
 				break;
 				case LOW_PWR_CORE_POWER_CTRL:
@@ -235,6 +236,26 @@ static bk_err_t low_pwr_core_message_handle(void)
 				{
 					bk_pm_cp0_response_cp1(PM_SLEEP_CTRL_CMD,BK_OK,0,0);
 					ret = bk_pm_module_vote_sleep_ctrl(msg.param1,msg.param2,msg.param3);
+				}
+				break;
+				case LOW_PWR_CORE_PSRAM_STACK_SLEEP:
+				{
+					const uint32_t request_id = msg.param3;
+
+					if ((msg.param1 != PM_SLEEP_MODULE_NAME_PSRAM)
+						|| (msg.param2 > 1U)
+						|| (request_id == 0U)) {
+						ret = BK_FAIL;
+						bk_pm_cp0_response_cp1(
+							PM_PSRAM_STACK_SLEEP_CTRL_CMD,
+							request_id, ret, 0);
+					} else {
+						ret = bk_pm_module_vote_sleep_ctrl(
+							msg.param1, msg.param2, 0);
+						bk_pm_cp0_response_cp1(
+							PM_PSRAM_STACK_SLEEP_CTRL_CMD,
+							request_id, ret, 0);
+					}
 				}
 				break;
 				case LOW_PWR_CORE_FREQ_CTRL:
