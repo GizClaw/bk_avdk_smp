@@ -63,6 +63,35 @@ typedef struct _wdrv_cmd_cfm
     beken_semaphore_t sema;
 }wdrv_cmd_cfm;
 
+/* Coherent confirm descriptor for a sync host command.
+ *
+ * wdrv_cmd_cfm and the caller's result buffer are stack locals. Under AP SMP
+ * with cacheable PSRAM task stacks the wdrv RX task publishes the confirm (list
+ * node, semaphore handle, length, payload) from one core while the blocked
+ * caller reads it on the other, and the two D-caches are not coherent, so the
+ * caller can observe a stale handle, length or result.
+ *
+ * This descriptor is allocated from the non-cacheable heap, i.e. the same
+ * coherent domain as wdrv_host_env.cfm_pending_list, and the payload is staged
+ * in it so that the copy into the caller's buffer happens on the caller's own
+ * core. 'list' MUST stay first so a co_list node pointer casts to this type.
+ *
+ * The staging area covers the largest confirm the command transport can carry
+ * (MAX_CMD_BUF_PAYLOAD, derived from MAX_CMD_BUF_LENGTH = 800) and is only
+ * allocated when the caller asked for a result. */
+#define WDRV_CFM_STAGING_SIZE   768
+
+typedef struct _wdrv_cfm_desc
+{
+    struct co_list_hdr list;
+    uint16_t cfm_id;
+    uint16_t cfm_sn;
+    uint16_t cfm_len;
+    uint16_t buf_size;
+    beken_semaphore_t sema;
+    uint8_t  staging[];
+}wdrv_cfm_desc_t;
+
 /*CMD header from AP to CP */
 typedef struct _wdrv_cmd_hdr
 {

@@ -327,26 +327,43 @@ int wdrv_tx_msg(uint8_t *msg, uint16_t msg_len, wdrv_cmd_cfm *cfm, uint8_t *resu
 
     if (cfm->waitcfm == WDRV_CMD_WAITCFM) {
 
-        ret = rtos_init_semaphore(&cfm->sema, 1);
+        /* Route the shared confirm state through a coherent descriptor instead
+           of the caller's (potentially cacheable PSRAM stack) wdrv_cmd_cfm. */
+        uint16_t buf_size = (result != NULL) ? WDRV_CFM_STAGING_SIZE : 0;
+        wdrv_cfm_desc_t *desc = os_malloc(sizeof(wdrv_cfm_desc_t) + buf_size);
+
+        if (desc == NULL) {
+            WDRV_LOGE("%s: cfm desc alloc failed, id:0x%x\n", __func__, hdr->cmd_id);
+            return -4;
+        }
+
+        os_memset(desc, 0, sizeof(wdrv_cfm_desc_t) + buf_size);
+        desc->buf_size = buf_size;
+
+        ret = rtos_init_semaphore(&desc->sema, 1);
         if(ret == BK_OK) 
         {
+            desc->cfm_id  = hdr->cmd_id + WDRV_CMD_CFM_OFFSET;
+            desc->cfm_sn  = hdr->cmd_sn;
+
+            /* keep the caller-visible fields in sync for debug/compat */
             cfm->cfm_buf = (uint8_t *)result;
-            cfm->cfm_id  = hdr->cmd_id + WDRV_CMD_CFM_OFFSET;
+            cfm->cfm_id  = desc->cfm_id;
             cfm->waitcfm = WDRV_CMD_WAITCFM;
-            cfm->cfm_sn  = hdr->cmd_sn;
+            cfm->cfm_sn  = desc->cfm_sn;
 
             WDRV_ENTER_TXMSG_CRITICAL(int_level);
-            co_list_push_back((struct co_list *)&wdrv_host_env.cfm_pending_list,(struct co_list_hdr *)&cfm->list);
+            co_list_push_back((struct co_list *)&wdrv_host_env.cfm_pending_list,(struct co_list_hdr *)&desc->list);
             WDRV_EXIT_TXMSG_CRITICAL(int_level);
 
             wdrv_tx_msg_send(msg, msg_len, WDRV_CMD_WAITCFM);
 
             // The len of result-buff is PRIVATE_COMMAND_DEF_LEN.
-            if ((rtos_get_semaphore(&cfm->sema, WDRV_CMDCFM_TIMEOUT)) != 0) {
+            if ((rtos_get_semaphore(&desc->sema, WDRV_CMDCFM_TIMEOUT)) != 0) {
 
                 rtos_lock_mutex(&wdrv_host_env.cfm_lock);
                 WDRV_ENTER_TXMSG_CRITICAL(int_level);
-                co_list_extract((struct co_list *)&wdrv_host_env.cfm_pending_list,(struct co_list_hdr *)&cfm->list);
+                co_list_extract((struct co_list *)&wdrv_host_env.cfm_pending_list,(struct co_list_hdr *)&desc->list);
                 WDRV_EXIT_TXMSG_CRITICAL(int_level);
                 rtos_unlock_mutex(&wdrv_host_env.cfm_lock);
 
@@ -357,16 +374,30 @@ int wdrv_tx_msg(uint8_t *msg, uint16_t msg_len, wdrv_cmd_cfm *cfm, uint8_t *resu
                 WDRV_LOGW("%s: cmd confirm timeout.\n", __func__);
                 ret = -3;
             } else {
+                /* The consumer already extracted the descriptor and filled the
+                   coherent staging area. Copy the result back on THIS core, the
+                   one that also reads the caller buffer afterwards. */
+                uint16_t len = desc->cfm_len;
+
+                if (len > desc->buf_size)
+                    len = desc->buf_size;
+
+                if (result && len)
+                    memcpy(result, desc->staging, len);
+
                 // receive cmd-cfm result
-                ret = cfm->cfm_len;
+                cfm->cfm_len = desc->cfm_len;
+                ret = desc->cfm_len;
             }
 
-            rtos_deinit_semaphore(&cfm->sema);
+            rtos_deinit_semaphore(&desc->sema);
         }
         else
         {
             BK_LOGD(NULL, "%s,%d,sema_init fail,send msg fail\n",__func__,__LINE__);
         }
+
+        os_free(desc);
     } else if (cfm->waitcfm == WDRV_CMD_NOWAITCFM) {
         // cmd send direct.
         wdrv_tx_msg_send(msg, msg_len, WDRV_CMD_NOWAITCFM);
