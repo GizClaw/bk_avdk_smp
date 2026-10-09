@@ -129,8 +129,8 @@ typedef enum
 } can_err_int_e;
 
 typedef enum {
-    CAN_PROTO_20,
-    CAN_PROTO_FD,
+    CAN_PROTO_CLASSIC, /**< Classic CAN */
+    CAN_PROTO_FD,      /**< CAN FD */
 } can_protocol_e;
 
 typedef enum {
