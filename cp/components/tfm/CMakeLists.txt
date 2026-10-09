@@ -178,6 +178,10 @@ if (CONFIG_SECURITY_FIRMWARE AND NOT CONFIG_TFM)
 	if(NOT bl2_wdt_period)
 		set(bl2_wdt_period "0x1F40")
 	endif()
+	set(bl2_wdt ${CONFIG_BL2_WDT})
+	if(NOT bl2_wdt)
+		set(bl2_wdt "OFF")
+	endif()
 
 	# BL2 consumes the physical (PHY) partition layout as partitions_gen.h in
 	# PARTITION_HDR_DIR. Generate it from the SMP-produced partition table so it
@@ -194,11 +198,9 @@ if (CONFIG_SECURITY_FIRMWARE AND NOT CONFIG_TFM)
 		BUILD_IN_SOURCE 1
 		CMAKE_ARGS
 		BUILD_COMMAND
-			mkdir -p ${partition_hdr_dir}
-			&& cd ${partition_hdr_dir}
-			&& python3 ${beken_utils_main} gen partition --partition_csv ${smp_partitions_csv} --ota_type XIP --out_hdr_file partitions_gen.h --out_layout_file partition_layout.h --secureboot
-			&& cd ${tfm_dir}
-			&& cmake
+			${CMAKE_COMMAND} -E make_directory ${partition_hdr_dir}
+			&& python3 ${beken_utils_main} gen partition --partition_csv ${smp_partitions_csv} --ota_type XIP --out_hdr_file ${partition_hdr_dir}/partitions_gen.h --out_layout_file ${partition_hdr_dir}/partition_layout.h --secureboot
+			&& ${CMAKE_COMMAND}
 			-G Ninja
 			-S ${tfm_dir}
 			-B ${tfm_build_dir}
@@ -206,7 +208,7 @@ if (CONFIG_SECURITY_FIRMWARE AND NOT CONFIG_TFM)
 			-DCMAKE_INSTALL_PREFIX=${tfm_install_dir}
 			-DARMINO_SDK_PATH=${armino_path}
 			-DTFM_PLATFORM=${tfm_platform}
-			-DTFM_TOOLCHAIN_FILE=toolchain_GNUARM.cmake
+			-DTFM_TOOLCHAIN_FILE=${tfm_dir}/toolchain_GNUARM.cmake
 			-DCMAKE_BUILD_TYPE=minsizerel
 			-DUSER=$ENV{USER}
 			-DBL2=ON
@@ -220,15 +222,14 @@ if (CONFIG_SECURITY_FIRMWARE AND NOT CONFIG_TFM)
 			-DBL2_DOWNLOAD=${CONFIG_TFM_BL2_DOWNLOAD}
 			-DCONFIG_XIP_NO_VERSION=${CONFIG_XIP_NO_VERSION}
 			-DCONFIG_BL2_VALIDATE_ENABLED_BY_EFUSE=${CONFIG_BL2_VALIDATE_ENABLED_BY_EFUSE}
-			-DCONFIG_BL2_WDT=${CONFIG_BL2_WDT}
+			-DCONFIG_BL2_WDT=${bl2_wdt}
 			-DCONFIG_BL2_WDT_PERIOD=${bl2_wdt_period}
-			&& cd ${tfm_build_dir}
-			&& ninja bl2 bl2_B bin/bl2.bin bin/bl2.elf bin/bl2_B.bin bin/bl2_B.elf
-			&& mkdir -p ${tfm_install_dir}/bin
-			&& cp -f ${tfm_build_dir}/bin/bl2.bin ${tfm_install_dir}/bin/bl2.bin
-			&& cp -f ${tfm_build_dir}/bin/bl2.elf ${tfm_install_dir}/bin/bl2.elf
-			&& cp -f ${tfm_build_dir}/bin/bl2_B.bin ${tfm_install_dir}/bin/bl2_B.bin
-			&& cp -f ${tfm_build_dir}/bin/bl2_B.elf ${tfm_install_dir}/bin/bl2_B.elf
+			&& ninja -C ${tfm_build_dir} bl2 bl2_B bin/bl2.bin bin/bl2.elf bin/bl2_B.bin bin/bl2_B.elf
+			&& ${CMAKE_COMMAND} -E make_directory ${tfm_install_dir}/bin
+			&& ${CMAKE_COMMAND} -E copy ${tfm_build_dir}/bin/bl2.bin ${tfm_install_dir}/bin/bl2.bin
+			&& ${CMAKE_COMMAND} -E copy ${tfm_build_dir}/bin/bl2.elf ${tfm_install_dir}/bin/bl2.elf
+			&& ${CMAKE_COMMAND} -E copy ${tfm_build_dir}/bin/bl2_B.bin ${tfm_install_dir}/bin/bl2_B.bin
+			&& ${CMAKE_COMMAND} -E copy ${tfm_build_dir}/bin/bl2_B.elf ${tfm_install_dir}/bin/bl2_B.elf
 		BUILD_BYPRODUCTS ${tfm_install_dir}/bin/bl2.bin
 		BUILD_ALWAYS 1
 		INSTALL_COMMAND ""
