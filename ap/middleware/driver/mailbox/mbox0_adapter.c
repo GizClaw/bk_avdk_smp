@@ -22,9 +22,12 @@ static void mbox0_rx_isr(mbox0_message_t *msg)
 
 	if(msg->data[1] == sizeof(data))
 	{
-#if CONFIG_CACHE_ENABLE
-	  	extern void flush_dcache(void *va, long size);
-		flush_dcache((void *)msg->data[0], sizeof(data));
+		/* Consumer of the peer core's buffer: invalidate only, and gate on the
+		   whichever knob builds the maintenance layer, so the
+		   cacheable-PSRAM-stack configuration is covered too. */
+#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+		extern void invalidate_dcache(void *va, long size);
+		invalidate_dcache((void *)msg->data[0], sizeof(data));
 #endif
 		memcpy(&data, (u8 *)msg->data[0], sizeof(data));
 	}
@@ -119,6 +122,11 @@ bk_err_t bk_mailbox_send(mailbox_data_t *data, mailbox_endpoint_t src, mailbox_e
 	message.data[0] = (u32)(&mailbox_buff[dst][box]);
 	message.data[1] = sizeof(mailbox_data_t);
 	message.dest_cpu = (uint8_t)dst;
+
+	/* mailbox_buff is ordinary memory while the FIFO trigger below is a Device
+	 * write; ARMv8-M does not order the two. Make the payload globally visible
+	 * before the peer core is signalled and dereferences message.data[0]. */
+	__asm volatile("dsb 0xF" ::: "memory");
 
 	ret_code = mbox0_drv_send_message(&message);
 

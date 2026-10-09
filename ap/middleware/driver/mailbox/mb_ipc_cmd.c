@@ -24,7 +24,9 @@
 #include "driver/dma.h"
 #include "driver/flash.h"
 
-#if CONFIG_CACHE_ENABLE
+/* cache.c is built when either knob is on, so the maintenance helpers are
+   available under exactly this condition. */
+#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
 #include "cache.h"
 #endif
 
@@ -158,8 +160,11 @@ static void ipc_cmd_rx_isr(ipc_chnl_cb_t *chnl_cb, mb_chnl_cmd_t *cmd_buf)
 			   so must copy data from cmd_buff in case that the buffer is released. */
 			if((ipc_cmd->cmd_buff != NULL) && (ipc_cmd->cmd_data_len > 0))
 			{
-				#if CONFIG_CACHE_ENABLE
-				flush_dcache(ipc_cmd->cmd_buff, ipc_cmd->cmd_data_len);
+				/* Consumer of the peer core's buffer: invalidate only, and gate
+				   on whichever knob builds the maintenance layer, so the
+				   cacheable-PSRAM-stack configuration is covered too. */
+				#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+				invalidate_dcache(ipc_cmd->cmd_buff, ipc_cmd->cmd_data_len);
 				#endif
 				__DMB();
 				
@@ -202,8 +207,9 @@ static void ipc_cmd_rx_isr(ipc_chnl_cb_t *chnl_cb, mb_chnl_cmd_t *cmd_buf)
 			   so must copy data from cmd_buff in case that the buffer is released. */
 			if((ipc_cmd->cmd_buff != NULL) && (ipc_cmd->cmd_data_len > 0))
 			{
-				#if CONFIG_CACHE_ENABLE
-				flush_dcache(ipc_cmd->cmd_buff, ipc_cmd->cmd_data_len);
+				/* Consumer of the peer core's buffer: invalidate only. */
+				#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+				invalidate_dcache(ipc_cmd->cmd_buff, ipc_cmd->cmd_data_len);
 				#endif
 				__DMB();
 				
@@ -273,8 +279,9 @@ static void ipc_cmd_tx_cmpl_isr(ipc_chnl_cb_t *chnl_cb, mb_chnl_ack_t *ack_buf) 
 			{
 				if((ipc_rsp->rsp_buff != NULL) && (ipc_rsp->rsp_data_len > 0))
 				{
-					#if CONFIG_CACHE_ENABLE
-					flush_dcache(ipc_rsp->rsp_buff, ipc_rsp->rsp_data_len);
+					/* Consumer of the peer core's rsp buffer: invalidate only. */
+					#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+					invalidate_dcache(ipc_rsp->rsp_buff, ipc_rsp->rsp_data_len);
 					#endif
 					__DMB();
 

@@ -22,7 +22,9 @@
 #include <driver/mb_ipc.h>
 #include <driver/mb_ipc_port_cfg.h>
 
-#if CONFIG_CACHE_ENABLE
+/* cache.c is built when either knob is on, so the maintenance helpers are
+ * available under exactly this condition. */
+#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
 #include "cache.h"
 #endif
 
@@ -498,8 +500,13 @@ static bk_err_t flash_read_bytes(uint32_t address, uint8_t *user_buf, uint32_t s
 		goto read_exit;
 	}
 
-	#if CONFIG_CACHE_ENABLE
-	flush_dcache(cmd_buff.buff, size);
+	/* cmd_buff.buff is a bare pointer to the CP's flash-data buffer and the AP
+	 * is the consumer: invalidate so the CPU re-fetches the CP's bytes. A clean
+	 * (or clean+invalidate) would write this core's stale copy back over the
+	 * CP's data. Gate on whichever knob builds the maintenance layer, so the
+	 * cacheable-PSRAM-stack configuration (CONFIG_CACHE_ENABLE=n) is covered. */
+	#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+	invalidate_dcache(cmd_buff.buff, size);
 	#endif
 	memcpy(user_buf, cmd_buff.buff, size);
 
@@ -613,6 +620,18 @@ static bk_err_t flash_write_bytes(uint32_t address, const uint8_t *user_buf, uin
 	cmd_buff.len  = size;
 	cmd_buff.buff = (u8 *)user_buf;
 	cmd_buff.crc  = calc_crc32(0, user_buf, size);
+
+	/* Producer side: the CP reads (and CRC-checks) user_buf through the bare
+	 * pointer above. When it lives on a cacheable PSRAM task stack the dirty
+	 * lines must reach physical memory first. Other buffers are non-cacheable
+	 * and are skipped so large writes pay nothing. */
+	#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK && CONFIG_DCACHE
+	if(((uint32_t)user_buf >= (uint32_t)CONFIG_AP_PSRAM_STACK_HEAP_ADDR) &&
+		((uint32_t)user_buf <  (uint32_t)(CONFIG_AP_PSRAM_STACK_HEAP_ADDR + CONFIG_AP_PSRAM_STACK_HEAP_SIZE)))
+	{
+		flush_dcache((void *)user_buf, size);
+	}
+	#endif
 
 	rtos_lock_mutex(&flash_mutex);
 

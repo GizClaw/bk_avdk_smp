@@ -19,8 +19,22 @@
 
 #include <driver/pwr_clk.h>
 
-#if (CONFIG_CACHE_ENABLE)
+#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
 #include "cache.h"
+#endif
+
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK && CONFIG_DCACHE
+/* Does 'p' point into the cacheable PSRAM task-stack heap? Such a buffer is
+ * seen by the AP and the CP through non-coherent private D-caches, so sharing
+ * the bare pointer across the mailbox would expose stale data. Everything else
+ * (SRAM, the general PSRAM heap) is already non-cacheable and needs no bounce. */
+static inline int bk_ipc_data_in_cacheable_stack(const void *p)
+{
+    uint32_t a = (uint32_t)p;
+
+    return (a >= (uint32_t)CONFIG_AP_PSRAM_STACK_HEAP_ADDR) &&
+           (a <  (uint32_t)(CONFIG_AP_PSRAM_STACK_HEAP_ADDR + CONFIG_AP_PSRAM_STACK_HEAP_SIZE));
+}
 #endif
 
 BK_SECTION_DEF(ipc_chan_reg, bk_ipc_chan_cfg_t);
@@ -449,6 +463,10 @@ int bk_ipc_send(bk_ipc_t *ipc, void *data, uint32_t size, uint32_t flags, uint32
     bk_ipc_data_t *ipc_data;
     bk_ipc_handle_t *bk_ipc_handle = (bk_ipc_handle_t *)(*ipc);
     bk_ipc_info_t *ipc_info = bk_ipc_handle->ipc;
+    void *xfer = data;
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK && CONFIG_DCACHE
+    void *bounce = NULL;
+#endif
 
     LOGV("%s %d ++\n", __func__, __LINE__);
 
@@ -468,7 +486,35 @@ int bk_ipc_send(bk_ipc_t *ipc, void *data, uint32_t size, uint32_t flags, uint32
 
     os_memset(ipc_data, 0, sizeof(bk_ipc_data_t));
 
-    ipc_data->data = data;
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK && CONFIG_DCACHE
+    /* The transport shares the caller's 'data' pointer with the CP as a bare
+     * physical address. When that buffer sits on a cacheable PSRAM task stack
+     * the CP reads a stale copy, and for a SYNC exchange - where the CP writes
+     * its response in place - the caller then reads a stale response. The SYNC
+     * caller blocks for the whole exchange, so bouncing through a non-cacheable
+     * heap buffer and copying the response back is safe. A copy bounce is used
+     * rather than directed cache maintenance because a whole-line invalidate on
+     * a live stack would discard neighbouring stack data sharing the line. */
+    if ((flags & MIPC_CHAN_SEND_FLAG_SYNC) && (data != NULL) && (size != 0) &&
+        bk_ipc_data_in_cacheable_stack(data))
+    {
+        bounce = os_malloc(size);
+
+        if (bounce == NULL)
+        {
+            /* Falling back to the raw stack pointer would reintroduce exactly the
+             * coherency failure this bounce prevents, so fail the call instead. */
+            LOGE("%s bounce malloc(%u) failed, aborting sync send\n", __func__, size);
+            ret = BK_ERR_NO_MEM;
+            goto out;
+        }
+
+        os_memcpy(bounce, data, size);
+        xfer = bounce;
+    }
+#endif
+
+    ipc_data->data = xfer;
     ipc_data->size = size;
     ipc_data->handle = bk_ipc_handle;
     ipc_data->flags = flags;
@@ -485,6 +531,14 @@ int bk_ipc_send(bk_ipc_t *ipc, void *data, uint32_t size, uint32_t flags, uint32
             LOGE("%s ipc send sync failed 0x%x\n", __func__, ret);
             goto out;
         }
+
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK && CONFIG_DCACHE
+        /* Copy the CP's in-place response out of the coherent bounce. */
+        if (bounce != NULL)
+        {
+            os_memcpy(data, bounce, size);
+        }
+#endif
     }
     else
     {
@@ -498,6 +552,14 @@ int bk_ipc_send(bk_ipc_t *ipc, void *data, uint32_t size, uint32_t flags, uint32
     }
 
 out:
+
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK && CONFIG_DCACHE
+    if (bounce != NULL)
+    {
+        os_free(bounce);
+        bounce = NULL;
+    }
+#endif
 
     if ((flags & MIPC_CHAN_SEND_FLAG_SYNC) && (ipc_data != NULL))
     {
@@ -591,7 +653,17 @@ static void bk_ipc_mailbox_rx_isr(void *param, mb_chnl_cmd_t *cmd_buf)
     ipc_header_t header;
     bk_ipc_info_t *ipc_info = (bk_ipc_info_t *)param;
 
-#if (CONFIG_CACHE_ENABLE)
+    /* This RX ISR consumes the peer core's payload. flush_all_dcache() was both
+     * the wrong scope (unbounded ISR latency) and the wrong direction (a clean
+     * can push this core's live data over the peer's). The bk_ipc_data_t header
+     * lives in non-cacheable heap, so only the referenced payload needs a
+     * targeted invalidate before the peer's bytes are read. */
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK && CONFIG_DCACHE
+    if ((data != NULL) && (data->data != NULL) && (data->size != 0))
+    {
+        invalidate_dcache(data->data, data->size);
+    }
+#elif (CONFIG_CACHE_ENABLE)
     flush_all_dcache();
 #endif
 

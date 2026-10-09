@@ -341,7 +341,10 @@ bk_err_t bk_dma_init(dma_id_t id, const dma_config_t *config)
     DMA_RETURN_ON_INVALID_ADDR(config->dst.start_addr, config->dst.end_addr);
     DMA_LOG_ON_ID_IS_STARTED(dma_num,dma_channel);
 
-#if CONFIG_CACHE_ENABLE
+    /* CONFIG_CACHEABLE_PSRAM_TASK_STACK builds run with CONFIG_CACHE_ENABLE=n,
+     * so the old gate left DMA buffers on cacheable task stacks with no
+     * maintenance at all. Gate on whichever knob builds cache.c. */
+#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
     flush_dcache((void *)config->src.start_addr, config->src.end_addr - config->src.start_addr);
     flush_dcache((void *)config->dst.start_addr, config->dst.end_addr - config->dst.start_addr);
 #endif
@@ -1109,7 +1112,8 @@ bk_err_t bk_dma_stateless_judgment_configuration(void *out, const void *in, uint
 
     /* init */
     s_dma[dma_num].id_init_bits |= BIT(dma_channel);
-#if CONFIG_CACHE_ENABLE
+    /* Same gate as bk_dma_init(). */
+#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
     flush_dcache((void *)dma_config.src.start_addr, dma_config.src.end_addr - dma_config.src.start_addr);
     flush_dcache((void *)dma_config.dst.start_addr, dma_config.dst.end_addr - dma_config.dst.start_addr);
 #endif

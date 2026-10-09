@@ -1195,7 +1195,11 @@ static bk_err_t uart_tx_dma_init(uart_id_t id)
 	dma_id_t dma_id = bk_dma_alloc(uart_id_to_dma_dev(id, 0));
 	if(dma_id < DMA_ID_MAX) {
 		dma_config_t dma_cfg = {0};
-		uint32_t tx_dma_test_buffer[8] = {0};
+		/* Static: this address is programmed into the DMA source register and
+		 * outlives this function. A stack array would leave the channel
+		 * pointing at a reclaimed frame until uart_tx_dma_write_to_fifo()
+		 * reprograms the source. */
+		static uint32_t tx_dma_test_buffer[8] = {0};
 		//DMA DST config:UART TX write port
 		uart_tx_dma_dst_port_config(id, &dma_cfg.dst);
 		

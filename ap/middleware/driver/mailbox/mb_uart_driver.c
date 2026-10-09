@@ -20,7 +20,9 @@
 #include <driver/mb_chnl_buff.h>
 #include <driver/mb_uart_driver.h>
 
-#if CONFIG_CACHE_ENABLE
+/* cache.c is built when either knob is on, so the maintenance helpers are
+   available under exactly this condition. */
+#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
 #include "cache.h"
 #endif
 
@@ -209,8 +211,9 @@ static void rx_isr_data_handler(mb_uart_cb_t *chnl_cb, mb_uart_cmd_t * uart_cmd)
 		goto rx_isr_data_xit;
 	}
 
-	#if CONFIG_CACHE_ENABLE
-	flush_dcache(uart_cmd->cmd_buff, uart_cmd->cmd_data_len);
+	/* Consumer of the peer core's buffer: invalidate only. */
+	#if (CONFIG_CACHE_ENABLE || CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+	invalidate_dcache(uart_cmd->cmd_buff, uart_cmd->cmd_data_len);
 	#endif
 
 	u16    rem_len, cpy_len;

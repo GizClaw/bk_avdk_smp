@@ -196,6 +196,13 @@ __attribute__((section(".iram"))) void flush_dcache(void *va, long size)
     }
 }
 
+__attribute__((section(".iram"))) void invalidate_dcache(void *va, long size)
+{
+    if (SCB->CLIDR & SCB_CLIDR_DC_Msk) {
+        SCB_InvalidateDCache_by_Addr(va, size);
+    }
+}
+
 void flush_all_dcache(void)
 {
     if (SCB->CLIDR & SCB_CLIDR_DC_Msk) {
