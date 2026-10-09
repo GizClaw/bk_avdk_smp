@@ -197,6 +197,19 @@ extern int wdt_init(void);
 extern void bk_delay_us(UINT32 us);
 /*================FUNCTION DECLARATION SECTION END========*/
 
+#if (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) && CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) \
+	|| (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+static bool pm_psram_stack_destructive_is_safe(void)
+{
+	const uint32_t shared_used_count = __atomic_load_n(
+		&FIXED_ADDR_PSRAM_USDE_COUNT, __ATOMIC_ACQUIRE);
+	const uint64_t psram_vote = 1ULL << PM_SLEEP_MODULE_NAME_PSRAM;
+
+	return (shared_used_count == 0U)
+		&& ((s_pm_sleeped_modules & psram_vote) != 0U);
+}
+#endif
+
 /**
  * !NOTIFICATION HERE!
  * pm module is divided into 3 partitions as below:
@@ -299,6 +312,15 @@ static uint32_t pm_check_protect_time(uint64_t current_tick, uint64_t previous_t
 static uint32_t pm_check_and_ctrl_sleep()
 {
 	uint32_t sleep_tick = 0;
+#if (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) && CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) \
+	|| (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+	if ((s_pm_sleep_mode != PM_MODE_NORMAL_SLEEP)
+		&& !pm_psram_stack_destructive_is_safe())
+	{
+		pm_enter_normal_sleep();
+		return 0;
+	}
+#endif
 	pm_check_power_on_module();
 	pm_wakeup_from_deepsleep_handle();
 	#if !CONFIG_PM_AP_POWERDOWN_WHEN_LV
@@ -928,8 +950,16 @@ static bk_err_t pm_cp1_psram_malloc_state_get()
 	#endif
 	return BK_OK;
 }
+
 static bk_err_t pm_psram_malloc_state_and_power_ctrl()
 {
+#if (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) && CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) \
+	|| (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+	if (!pm_psram_stack_destructive_is_safe())
+	{
+		return BK_FAIL;
+	}
+#endif
 #if !CONFIG_PM_PSRAM_FORCE_ON
   #if CONFIG_PSRAM_AS_SYS_MEMORY
 	uint32_t cp0_psram_malloc_count = 0;
@@ -973,6 +1003,13 @@ static bk_err_t pm_psram_malloc_state_and_power_ctrl()
 	#endif
 	)
 	{
+#if (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) && CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) \
+	|| (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+		if (!pm_psram_stack_destructive_is_safe())
+		{
+			return BK_FAIL;
+		}
+#endif
 		bk_pm_module_vote_psram_ctrl(PM_POWER_PSRAM_MODULE_NAME_AS_MEM,PM_POWER_MODULE_STATE_OFF);
 		bk_pm_module_vote_power_ctrl(PM_POWER_SUB_MODULE_NAME_AHBP_PSRAM, PM_POWER_MODULE_STATE_OFF);
 	}
@@ -1078,6 +1115,31 @@ static bk_err_t pm_force_analog_close(void)
 }
 bk_err_t bk_pm_sleep_mode_set(pm_sleep_mode_e sleep_mode)
 {
+#if (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) && CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) \
+	|| (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+	uint32_t psram_stack_destructive_safe = 1U;
+
+	if ((sleep_mode == PM_MODE_DEEP_SLEEP)
+		|| (sleep_mode == PM_MODE_SUPER_DEEP_SLEEP)
+		|| (sleep_mode == PM_MODE_FORCE_DEEP_SLEEP))
+	{
+		#if defined(FIXED_ADDR_PSRAM_USDE_COUNT)
+		const uint32_t shared_used_count = __atomic_load_n(
+			&FIXED_ADDR_PSRAM_USDE_COUNT, __ATOMIC_ACQUIRE);
+		const uint64_t psram_vote =
+			1ULL << PM_SLEEP_MODULE_NAME_PSRAM;
+		psram_stack_destructive_safe =
+			(shared_used_count == 0U)
+			&& ((s_pm_sleeped_modules & psram_vote) != 0U);
+		#else
+		psram_stack_destructive_safe = 0U;
+		#endif
+		if (psram_stack_destructive_safe == 0U)
+		{
+			return BK_FAIL;
+		}
+	}
+#endif
 	if(pm_check_multimedia_pwr_bus_state() == BK_FAIL)
 	{
 		return BK_FAIL;
@@ -1656,10 +1718,20 @@ static void pm_enter_super_deep_sleep()
 }
 #endif
 
-static void pm_low_voltage_resource_set()
+static bk_err_t pm_low_voltage_resource_set()
 {
 	pm_dev_id_e dev_id = 0;
-	pm_psram_malloc_state_and_power_ctrl();
+#if (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) && CONFIG_CACHEABLE_PSRAM_TASK_STACK_PM_GUARD) \
+	|| (defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK)
+	if (!pm_psram_stack_destructive_is_safe())
+	{
+		return BK_FAIL;
+	}
+#endif
+	if (pm_psram_malloc_state_and_power_ctrl() != BK_OK)
+	{
+		return BK_FAIL;
+	}
 	pm_lv_enter_time_out_clear();
 	#if CONFIG_PM_LV_WDT_PROTECTION
 		#if CONFIG_AON_WDT
@@ -1697,6 +1769,7 @@ static void pm_low_voltage_resource_set()
 	bk_flash_power_saving_enter();
 	#endif
 
+	return BK_OK;
 }
 
 void pm_low_voltage_bsp_restore(void)
@@ -1795,12 +1868,16 @@ static uint32_t pm_low_voltage_process()
 	entry_tick = bk_aon_rtc_get_current_tick(AON_RTC_ID_1);
 #endif
 
+	if (pm_low_voltage_resource_set() != BK_OK)
+	{
+		rtos_exit_critical(int_level);
+		return 0;
+	}
+
 	#if CONFIG_PM_LV_TIME_COST_DEBUG
 	pm_enter_lv_rtc_tick_clear();
 	pm_lv_rtc_tick_set(PM_LV_ENTER_STEP_0,pm_rtc_cur_tick_get());
 	#endif
-
-	pm_low_voltage_resource_set();
 
 	#if CONFIG_PM_LV_TIME_COST_DEBUG
 	pm_lv_rtc_tick_set(PM_LV_ENTER_STEP_1,pm_rtc_cur_tick_get());

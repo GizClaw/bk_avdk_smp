@@ -3,6 +3,22 @@ menu "PM"
 		bool "pm enable"
 		default n
 
+	config CACHEABLE_PSRAM_TASK_STACK
+		bool "Paired AP uses cacheable PSRAM task stacks"
+		default n
+		help
+			Matched-image marker indicating that the paired AP image uses
+			cacheable PSRAM task stacks. This does not select the CP guard.
+
+	config CACHEABLE_PSRAM_TASK_STACK_PM_GUARD
+		bool "Guard destructive PM modes while AP PSRAM stacks are live"
+		depends on SOC_BK7258 && PM_ENABLE && PM_V2
+		depends on CACHEABLE_PSRAM_TASK_STACK
+		depends on PSRAM_AS_SYS_MEMORY
+		depends on !PM_AP_POWERDOWN_WHEN_LV
+		depends on !PM_PSRAM_FORCE_ON
+		default n
+
 	config PM_SUPER_DEEP_SLEEP
 		bool "Enable super deep sleep"
 		default n
