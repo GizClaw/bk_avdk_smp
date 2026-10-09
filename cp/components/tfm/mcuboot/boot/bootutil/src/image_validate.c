@@ -71,6 +71,7 @@ bootutil_img_hash(struct enc_key_data *enc_state, int image_index,
                   uint8_t *seed, int seed_len)
 {
     bootutil_sha256_context sha256_ctx;
+    int hash_rc;
 	#if CONFIG_OTA_OVERWRITE
     uint32_t blk_sz;
 	uint32_t off;
@@ -102,6 +103,7 @@ bootutil_img_hash(struct enc_key_data *enc_state, int image_index,
     /* Encrypted images only exist in the secondary slot */
     if (MUST_DECRYPT(fap, image_index, hdr) &&
             !boot_enc_valid(enc_state, image_index, fap)) {
+        BOOT_LOG_ERR("enc invalid");
         return -1;
     }
 #endif
@@ -111,7 +113,12 @@ bootutil_img_hash(struct enc_key_data *enc_state, int image_index,
     /* in some cases (split image) the hash is seeded with data from
      * the loader image */
     if (seed && (seed_len > 0)) {
-        bootutil_sha256_update(&sha256_ctx, seed, seed_len);
+        hash_rc = bootutil_sha256_update(&sha256_ctx, seed, seed_len);
+        if (hash_rc) {
+            BOOT_LOG_ERR("seed upd rc=%d", hash_rc);
+            bootutil_sha256_drop(&sha256_ctx);
+            return hash_rc;
+        }
     }
 
     /* Hash is computed over image header and image itself. */
@@ -149,6 +156,7 @@ bootutil_img_hash(struct enc_key_data *enc_state, int image_index,
 #endif
             rc = flash_area_read(fap, off, tmp_buf, blk_sz);
             if (rc) {
+                BOOT_LOG_ERR("flash rd rc=%d", rc);
                 bootutil_sha256_drop(&sha256_ctx);
                 return rc;
             }
@@ -162,7 +170,12 @@ bootutil_img_hash(struct enc_key_data *enc_state, int image_index,
                 }
             }
 #endif
-            bootutil_sha256_update(&sha256_ctx, tmp_buf, blk_sz);
+            hash_rc = bootutil_sha256_update(&sha256_ctx, tmp_buf, blk_sz);
+            if (hash_rc) {
+                BOOT_LOG_ERR("ota upd rc=%d", hash_rc);
+                bootutil_sha256_drop(&sha256_ctx);
+                return hash_rc;
+            }
         }
     }
     else 
@@ -177,29 +190,48 @@ bootutil_img_hash(struct enc_key_data *enc_state, int image_index,
         }
 #endif
 
-        bootutil_sha256_update(&sha256_ctx,
+        hash_rc = bootutil_sha256_update(&sha256_ctx,
                             (void*)(addr + SOC_FLASH_BASE_ADDR),
                             size);
 #if CONFIG_DIRECT_XIP
         flash_set_excute_enable(0);
 #endif
+        if (hash_rc) {
+            BOOT_LOG_ERR("img upd rc=%d", hash_rc);
+            bootutil_sha256_drop(&sha256_ctx);
+            return hash_rc;
+        }
     }
 #endif /* MCUBOOT_RAM_LOAD */
-    bootutil_sha256_finish(&sha256_ctx, hash_result);
+    hash_rc = bootutil_sha256_finish(&sha256_ctx, hash_result);
     bootutil_sha256_drop(&sha256_ctx);
+    if (hash_rc) {
+        BOOT_LOG_ERR("hash fin rc=%d", hash_rc);
+    }
 
-    return 0;
+    return hash_rc;
 }
 
 static int
 bootutil_hash_hash(uint8_t *digest, uint32_t digest_sz, uint8_t *hash_result)
 {
     bootutil_sha256_context sha256_ctx;
+    int rc;
+
     bootutil_sha256_init(&sha256_ctx);
-    bootutil_sha256_update(&sha256_ctx, digest, digest_sz);
-    bootutil_sha256_finish(&sha256_ctx, hash_result);
+    rc = bootutil_sha256_update(&sha256_ctx, digest, digest_sz);
+    if (rc) {
+        BOOT_LOG_ERR("hash2 upd rc=%d", rc);
+        bootutil_sha256_drop(&sha256_ctx);
+        return rc;
+    }
+    rc = bootutil_sha256_finish(&sha256_ctx, hash_result);
     bootutil_sha256_drop(&sha256_ctx);
-    return 0;
+    if (rc) {
+        BOOT_LOG_ERR("hash2 fin rc=%d", rc);
+    }
+
+    return rc;
 }
 
 
@@ -416,8 +448,8 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
 #endif /* EXPECTED_SIG_TLV */
     struct image_tlv_iter it;
     uint8_t buf[SIG_BUF_SIZE];
-    uint8_t hash[32];
-    uint8_t hash_hash[32];
+    uint8_t hash[32] = {0};
+    uint8_t hash_hash[32] = {0};
     int rc = 0;
     fih_int fih_rc = FIH_FAILURE;
 #ifdef MCUBOOT_HW_ROLLBACK_PROT
@@ -443,6 +475,7 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
 
     rc = bootutil_tlv_iter_begin(&it, hdr, fap, IMAGE_TLV_ANY, false);
     if (rc) {
+        BOOT_LOG_ERR("tlv rc=%d", rc);
         goto out;
     }
 
@@ -453,6 +486,7 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
     while (true) {
         rc = bootutil_tlv_iter_next(&it, &off, &len, &type);
         if (rc < 0) {
+            BOOT_LOG_ERR("tlv rc=%d", rc);
             goto out;
         } else if (rc > 0) {
             break;
@@ -464,16 +498,19 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
              * present.
              */
             if (len != sizeof(hash)) {
+                BOOT_LOG_ERR("sha256 len=%u", len);
                 rc = -1;
                 goto out;
             }
             rc = LOAD_IMAGE_DATA(hdr, fap, off, buf, sizeof(hash));
             if (rc) {
+                BOOT_LOG_ERR("read rc=%d", rc);
                 goto out;
             }
 
             FIH_CALL(boot_fih_memequal, fih_rc, hash, buf, sizeof(hash));
             if (fih_not_eq(fih_rc, FIH_SUCCESS)) {
+                BOOT_LOG_ERR("hash mismatch");
                 goto out;
             }
 
@@ -485,11 +522,13 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
              * Determine which key we should be checking.
              */
             if (len > 32) {
+                BOOT_LOG_ERR("key len=%u", len);
                 rc = -1;
                 goto out;
             }
             rc = LOAD_IMAGE_DATA(hdr, fap, off, buf, len);
             if (rc) {
+                BOOT_LOG_ERR("read rc=%d", rc);
                 goto out;
             }
             key_id = bootutil_find_key(buf, len);
@@ -503,11 +542,13 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
              * Determine which key we should be checking.
              */
             if (len > sizeof(key_buf)) {
+                BOOT_LOG_ERR("key len=%u", len);
                 rc = -1;
                 goto out;
             }
             rc = LOAD_IMAGE_DATA(hdr, fap, off, key_buf, len);
             if (rc) {
+                BOOT_LOG_ERR("read rc=%d", rc);
                 goto out;
             }
             key_id = bootutil_find_key(image_index, key_buf, len);
@@ -523,11 +564,13 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
                 continue;
             }
             if (!EXPECTED_SIG_LEN(len) || len > sizeof(buf)) {
+                BOOT_LOG_ERR("sig len=%u", len);
                 rc = -1;
                 goto out;
             }
             rc = LOAD_IMAGE_DATA(hdr, fap, off, buf, len);
             if (rc) {
+                BOOT_LOG_ERR("read rc=%d", rc);
                 goto out;
             }
             /* Authenticate the signature only when required. When skipped the
@@ -545,18 +588,21 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
              */
             if (len != sizeof(img_security_cnt)) {
                 /* Security counter is not valid. */
+                BOOT_LOG_ERR("sec len=%u", len);
                 rc = -1;
                 goto out;
             }
 
             rc = LOAD_IMAGE_DATA(hdr, fap, off, &img_security_cnt, len);
             if (rc) {
+                BOOT_LOG_ERR("read rc=%d", rc);
                 goto out;
             }
 
             FIH_CALL(boot_nv_security_counter_get, fih_rc, image_index,
                                                            &security_cnt);
             if (fih_not_eq(fih_rc, FIH_SUCCESS)) {
+                BOOT_LOG_ERR("sec get");
                 goto out;
             }
 
@@ -566,6 +612,7 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
             fih_rc = fih_int_encode_zero_equality(img_security_cnt <
                                    fih_int_decode(security_cnt));
             if (fih_not_eq(fih_rc, FIH_SUCCESS)) {
+                BOOT_LOG_ERR("sec cnt");
                 goto out;
             }
 
@@ -577,6 +624,7 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
 
     rc = !sha256_valid;
     if (rc) {
+        BOOT_LOG_ERR("sha256 miss");
         goto out;
     }
 #ifdef EXPECTED_SIG_TLV
@@ -593,11 +641,11 @@ bootutil_img_validate(struct enc_key_data *enc_state, int image_index,
         BOOT_LOG_FORCE("hash-only OK");
         (void)valid_signature;
         fih_rc = FIH_SUCCESS;
-
     }
 #endif
 #ifdef MCUBOOT_HW_ROLLBACK_PROT
     if (fih_not_eq(security_counter_valid, FIH_SUCCESS)) {
+        BOOT_LOG_ERR("sec miss");
         rc = -1;
         goto out;
     }

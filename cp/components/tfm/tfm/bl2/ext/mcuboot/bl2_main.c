@@ -199,7 +199,7 @@ int main(void)
     }
 
     flash_map_init();
-    dump_partition();
+    //dump_partition();
     dump_efuse();
 
     plat_err = tfm_plat_otp_init();
