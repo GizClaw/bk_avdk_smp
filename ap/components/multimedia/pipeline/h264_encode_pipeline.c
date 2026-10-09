@@ -873,7 +873,9 @@ static void h264_encode_main(beken_thread_arg_t data)
 
 				case H264_ENCODE_STOP:
 				{
-					beken_semaphore_t *beken_semaphore = (beken_semaphore_t*)msg.param;
+					/* Handle passed by value, see h264_encode_task_stop().
+					   Captured before the drain loop below overwrites msg. */
+					beken_semaphore_t beken_semaphore = (beken_semaphore_t)msg.param;
 
 					LOGD("%s H264_ENCODE_STOP\n", __func__);
 
@@ -924,7 +926,7 @@ static void h264_encode_main(beken_thread_arg_t data)
 					h264_encode_config->h264_queue = NULL;
 					h264_encode_config->h264_thread = NULL;
 
-					rtos_set_semaphore(beken_semaphore);
+					rtos_set_semaphore(&beken_semaphore);
 				}
 				goto exit;
 
@@ -1112,13 +1114,21 @@ void h264_encode_task_stop(void)
 	}
 
 	msg.event = H264_ENCODE_STOP;
-	msg.param = (uint32_t)&sem;
+	/* Pass the semaphore HANDLE by value, not &sem: 'sem' lives on this
+	 * producer's cacheable PSRAM stack, while the consumer task may run on the
+	 * other AP core and would dereference a stale cache line. The handle value
+	 * travels through non-cacheable queue storage and points at a non-cacheable
+	 * semaphore object, so it is coherent by construction. */
+	msg.param = (uint32_t)sem;
 
 	ret = rtos_push_to_queue(&h264_encode_config->h264_queue, &msg, BEKEN_NO_WAIT);
 
 	if (BK_OK != ret)
 	{
+		/* Nothing will ever signal sem, so the wait below would never return. */
 		LOGE("%s rtos_push_to_queue failed:%d\r\n", __func__, ret);
+		rtos_deinit_semaphore(&sem);
+		return;
 	}
 
 	rtos_get_semaphore(&sem, BEKEN_NEVER_TIMEOUT);

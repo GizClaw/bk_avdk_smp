@@ -869,11 +869,12 @@ static void rotate_main(beken_thread_arg_t data)
 
 					rtos_deinit_oneshot_timer(&rotate_config->rotate_timer);
 
-					beken_semaphore_t *beken_semaphore = (beken_semaphore_t*)msg.param;
+					/* Handle passed by value, see rotate_task_stop(). */
+					beken_semaphore_t beken_semaphore = (beken_semaphore_t)msg.param;
 					rtos_deinit_queue(&rotate_config->rotate_queue);
 					rotate_config->rotate_queue = NULL;
 					rotate_config->rotate_thread = NULL;
-					rtos_set_semaphore(beken_semaphore);
+					rtos_set_semaphore(&beken_semaphore);
 					rtos_delete_thread(NULL);
 				}
 				break;
@@ -1140,8 +1141,6 @@ void rotate_task_stop(void)
 {
 	beken_semaphore_t sem;
 	media_msg_t msg;
-	msg.event = ROTATE_STOP;
-	msg.param = (uint32_t)&sem;
 
 	int ret = rtos_init_semaphore(&sem, 1);
 
@@ -1151,7 +1150,23 @@ void rotate_task_stop(void)
 		return;
 	}
 
+	msg.event = ROTATE_STOP;
+	/* Pass the semaphore HANDLE by value, not &sem: 'sem' lives on this
+	 * producer's cacheable PSRAM stack, while the consumer task may run on the
+	 * other AP core and would dereference a stale cache line. The handle value
+	 * travels through non-cacheable queue storage and points at a non-cacheable
+	 * semaphore object, so it is coherent by construction. */
+	msg.param = (uint32_t)sem;
+
 	ret = rtos_push_to_queue(&rotate_config->rotate_queue, &msg, BEKEN_WAIT_FOREVER);
+
+	if (BK_OK != ret)
+	{
+		/* Nothing will ever signal sem, so the wait below would never return. */
+		LOGE("%s rtos_push_to_queue failed:%d\r\n", __func__, ret);
+		rtos_deinit_semaphore(&sem);
+		return;
+	}
 
 	rtos_get_semaphore(&sem, BEKEN_NEVER_TIMEOUT);
 	rtos_deinit_semaphore(&sem);

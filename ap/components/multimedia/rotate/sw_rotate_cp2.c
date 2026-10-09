@@ -73,7 +73,10 @@ static rot_buf_t *s_rot_buf = NULL;
 
 bk_err_t software_rotate_task_send_msg(uint32_t type, uint32_t param)
 {
-	int ret = BK_OK;
+	/* Default to failure: when the queue is absent the message is never
+	 * delivered, so reporting BK_OK would make callers wait for a completion
+	 * that can no longer happen. */
+	int ret = BK_FAIL;
 	media_msg_t msg;
 
 	if (sw_rotate_config && sw_rotate_config->sw_rotate_queue)
@@ -401,7 +404,15 @@ bk_err_t software_rotate_task_close(void)
 
 	sw_rotate_config->task_state = false;
 
-	software_rotate_task_send_msg(EVENT_YUV_ROTATE_STOP_NOTIFY, 0);
+	if (software_rotate_task_send_msg(EVENT_YUV_ROTATE_STOP_NOTIFY, 0) != BK_OK)
+	{
+		/* Nothing will signal sw_rotate_sem, so waiting below would block
+		 * forever. Tear down directly; software_rotate_task_deinit() is
+		 * NULL-safe for every member it releases. */
+		LOGE("%s, stop notify not delivered\r\n", __func__);
+		software_rotate_task_deinit();
+		return BK_FAIL;
+	}
 
 	rtos_get_semaphore(&sw_rotate_config->sw_rotate_sem, BEKEN_NEVER_TIMEOUT);
 
