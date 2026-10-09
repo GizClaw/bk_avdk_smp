@@ -347,7 +347,7 @@ static void ping_start_with_family(char* target_name, uint32_t times, size_t siz
 
 void ping_start(char* target_name, uint32_t times, size_t size)
 {
-	ping_start_with_family(target_name, times, size, AF_UNSPEC);
+	ping_start_with_family(target_name, times, size, AF_INET);
 }
 
 void ping6_start(char* target_name, uint32_t times, size_t size)
@@ -377,9 +377,9 @@ int ping(char* target_name, uint32_t times, size_t size)
     {
         size = PING_DATA_SIZE;
     }
-	LWIP_DEBUGF( PING_DEBUG, ("ping: size:%u times:%u\n", size, times));
+	LWIP_DEBUGF( PING_DEBUG, ("ping: size:%u times:%u family:%d\n", size, times, p_param.addr_family));
     memset(&hint, 0, sizeof(hint));
-    hint.ai_family = p_param.addr_family;
+    hint.ai_family = (p_param.addr_family == AF_INET6) ? AF_INET6 : AF_INET;
     /* convert URL to IP */
     if (lwip_getaddrinfo(target_name, NULL, &hint, &res) != 0)
     {
@@ -414,6 +414,8 @@ int ping(char* target_name, uint32_t times, size_t size)
     {
         h = (struct sockaddr_in *)res->ai_addr;
         inet_addr_to_ip4addr(ip_2_ip4(&target_addr),&h->sin_addr);
+        IP_SET_TYPE(&target_addr, IPADDR_TYPE_V4);
+        src_addr = NULL;
     }
     af = res->ai_family;
     lwip_freeaddrinfo(res);
