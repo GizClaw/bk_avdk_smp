@@ -7,6 +7,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+/* Return zero to skip early interrupted-stack inspection. */
 int bk_fault_context_enter(uint32_t reason, uint32_t exc_return, uint32_t stack);
 void bk_fault_context_observe(uint32_t reason, const SAVED_CONTEXT *context);
 void bk_fault_context_persist(uint32_t reason, const SAVED_CONTEXT *context);

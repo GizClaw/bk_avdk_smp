@@ -857,10 +857,11 @@ void user_except_handler_ex(uint32_t reset_reason, uint32_t lr, uint32_t sp)
         // Make sure the interrupt is disable
         uint32_t int_level = port_disable_interrupts_flag();
 
+        int observe_context = 1;
         if (bk_fault_context_enter != NULL) {
-            bk_fault_context_enter(reset_reason, lr, sp);
+            observe_context = bk_fault_context_enter(reset_reason, lr, sp);
         }
-        if (bk_fault_context_observe != NULL) {
+        if (observe_context && bk_fault_context_observe != NULL) {
             SAVED_CONTEXT early_context;
             bk_capture_fault_context(lr, sp, &early_context, 0);
             bk_fault_context_observe(reset_reason, &early_context);
