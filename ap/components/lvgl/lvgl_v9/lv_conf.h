@@ -141,11 +141,6 @@
  * Set it to 0 to have no limit. */
 #define LV_DRAW_LAYER_MAX_MEMORY 0  /**< No limit by default [bytes]*/
 
-/** Stack size of drawing thread.
- * NOTE: If FreeType or ThorVG is enabled, it is recommended to set it to 32KB or more.
- */
-#define LV_DRAW_THREAD_STACK_SIZE    (8 * 1024)         /**< [bytes]*/
-
 /** Thread priority of the drawing task.
  *  Higher values mean higher priority.
  *  Can use values from lv_thread_prio_t enum in lv_os.h: LV_THREAD_PRIO_LOWEST,
@@ -178,11 +173,6 @@
     /* The threshold of the luminance to consider a pixel as
      * active in indexed color format */
     #define LV_DRAW_SW_I1_LUM_THRESHOLD 127
-
-    /** Set number of draw units.
-     *  - > 1 requires operating system to be enabled in `LV_USE_OS`.
-     *  - > 1 means multiple threads will render the screen in parallel. */
-    #define LV_DRAW_SW_DRAW_UNIT_CNT    2
 
     /** Use Arm-2D to accelerate software (sw) rendering. */
     #define LV_USE_DRAW_ARM2D_SYNC      0
