@@ -475,35 +475,33 @@ bk_err_t bk_pm_module_vote_sleep_ctrl(pm_sleep_module_name_e module, uint32_t sl
 	{
 		return BK_OK;
 	}
-		if(module == PM_SLEEP_MODULE_NAME_PSRAM)
-		{
-			if(sleep_time != 0U)
-			{
-				return BK_FAIL;
-			}
-			return bk_pm_psram_stack_vote_sleep_ctrl(sleep_state);
-		}
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+	if ((module == PM_SLEEP_MODULE_NAME_PSRAM) && (sleep_time == 0U))
+	{
+		return bk_pm_psram_stack_vote_sleep_ctrl(sleep_state);
+	}
+#endif
 	uint32_t flag = rtos_enter_critical();
-		const bool vote_set = pm_shared_u64_bit_set(
-			&FIXED_ADDR_PM_AP_SLEEP_VOTE, (uint32_t)module);
+	const bool vote_set = pm_shared_u64_bit_set(
+		&FIXED_ADDR_PM_AP_SLEEP_VOTE, (uint32_t)module);
 	rtos_exit_critical(flag);
-		if (!vote_set)
-		{
-			return BK_FAIL;
-		}
+	if (!vote_set)
+	{
+		return BK_FAIL;
+	}
 	bk_pm_cp1_sleep_ctrl_state_set(PM_MAILBOX_COMMUNICATION_INIT);
 
     ret = pm_cp1_mailbox_send_data(PM_SLEEP_CTRL_CMD, module,sleep_state,sleep_time);
     if(ret != BK_OK)
     {
 		flag = rtos_enter_critical();
-			const bool vote_cleared = pm_shared_u64_bit_clear(
-				&FIXED_ADDR_PM_AP_SLEEP_VOTE, (uint32_t)module);
+		const bool vote_cleared = pm_shared_u64_bit_clear(
+			&FIXED_ADDR_PM_AP_SLEEP_VOTE, (uint32_t)module);
 		rtos_exit_critical(flag);
-			if (!vote_cleared)
-			{
-				return BK_FAIL;
-			}
+		if (!vote_cleared)
+		{
+			return BK_FAIL;
+		}
         return BK_FAIL;
     }
 
@@ -524,13 +522,13 @@ bk_err_t bk_pm_module_vote_sleep_ctrl(pm_sleep_module_name_e module, uint32_t sl
 	}
 
 	flag = rtos_enter_critical();
-		const bool vote_cleared = pm_shared_u64_bit_clear(
-			&FIXED_ADDR_PM_AP_SLEEP_VOTE, (uint32_t)module);
+	const bool vote_cleared = pm_shared_u64_bit_clear(
+		&FIXED_ADDR_PM_AP_SLEEP_VOTE, (uint32_t)module);
 	rtos_exit_critical(flag);
-		if (!vote_cleared)
-		{
-			return BK_FAIL;
-		}
+	if (!vote_cleared)
+	{
+		return BK_FAIL;
+	}
 #endif
 	return BK_OK;
 
