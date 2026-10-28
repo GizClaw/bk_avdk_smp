@@ -296,6 +296,8 @@ static void musb_fifo_flush(uint8_t ep)
     }
 }
 
+static uint16_t s_dma_tx_len[16];
+
 static void musb_write_packet(uint8_t ep_idx, uint8_t *buffer, uint16_t len)
 {
     if(buffer == NULL) return;
@@ -311,6 +313,7 @@ static void musb_write_packet(uint8_t ep_idx, uint8_t *buffer, uint16_t len)
     uint32_t dma_b_addr = (uint32_t)(&buffer[0]);
 
     if((len > CONIFG_USB_MUSB_DMA_MIN_SIZE) && (ep_idx != 0)) {
+        s_dma_tx_len[chn_idx] = len;
         HWREG(MUSB_DMA_ADDR_BASE(chn_idx)) = dma_b_addr;
         HWREG(MUSB_DMA_COUNT_BASE(chn_idx)) = len;
         HWREGH(MUSB_DMA_CNTL_BASE(chn_idx)) = ((~USB_DMACTL0_MODE) & (USB_DMACTL_ENABLE | USB_DMACTL_DIR | USB_DMACTL0_BRSTM_ANY | (ep_idx << 4) | USB_DMACTL_IE));
@@ -420,7 +423,20 @@ void musb_bulk_pipe_init(struct musb_pipe *pipe, uint8_t *buffer, uint32_t bufle
         }
         musb_write_packet(pipe->ep_local_index, buffer, buflen);
         HWREGB_OR_ACTIVE_EP(pipe->ep_local_index, (USB_BASE + MUSB_IND_TXCSRH_OFFSET), USB_TXCSRH1_MODE);
-        HWREGB_SET_ACTIVE_EP(pipe->ep_local_index, (USB_BASE + MUSB_IND_TXCSRL_OFFSET), USB_TXCSRL1_TXRDY);
+        /* FIX(babble): DMA-filled packets (>64B) are still filling the FIFO
+         * asynchronously here; an early TXRDY lets the SIE launch a
+         * partially-filled packet. TXRDY is instead raised by AUTOSET (full
+         * mps) or the DMA completion IRQ, same as the continuation path.
+         * PIO-filled packets (<=64B) are complete on return, TXRDY is safe. */
+#ifndef USB_FIX_FIRSTPKT_NO_MANUAL_TXRDY
+#define USB_FIX_FIRSTPKT_NO_MANUAL_TXRDY 1
+#endif
+#if CONFIG_USB_DMA_ENABLE && USB_FIX_FIRSTPKT_NO_MANUAL_TXRDY
+        if (buflen <= CONIFG_USB_MUSB_DMA_MIN_SIZE)
+#endif
+        {
+            HWREGB_SET_ACTIVE_EP(pipe->ep_local_index, (USB_BASE + MUSB_IND_TXCSRL_OFFSET), USB_TXCSRL1_TXRDY);
+        }
     }
 }
 
@@ -1302,6 +1318,33 @@ int usbh_submit_urb(struct usbh_urb *urb)
     return ret;
 errout_timeout:
     pipe->waiter = false;
+    {
+        /* dump TX pipe state at URB timeout for field diagnosis */
+        uint32_t old_ep = musb_get_active_ep();
+        musb_set_active_ep(pipe->ep_local_index);
+        USB_LOG_ERR("[URB-TO] lep%d xfrd=%u TXCSRL=0x%02x TXCSRH=0x%02x TXIS=0x%04x\r\n",
+            pipe->ep_local_index, (unsigned)pipe->xfrd,
+            HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET),
+            HWREGB(USB_BASE + MUSB_IND_TXCSRH_OFFSET),
+            HWREGH(USB_BASE + MUSB_TXIS_OFFSET));
+        musb_set_active_ep(old_ep);
+    }
+    /* FIX: a timed-out bulk-OUT URB leaves its packet pending in the TX
+     * FIFO (TXPKTRDY set, never ACKed). The next URB would append after the
+     * stale data and the SIE would send a merged >mps packet (babble).
+     * Flush before kill. */
+#ifndef USB_FIX_TIMEOUT_FLUSH
+#define USB_FIX_TIMEOUT_FLUSH 1
+#endif
+#if USB_FIX_TIMEOUT_FLUSH
+    if ((pipe->ep_type == USB_ENDPOINT_TYPE_BULK) && !(pipe->ep_addr & 0x80)) {
+        uint32_t old_ep = musb_get_active_ep();
+        musb_set_active_ep(pipe->ep_local_index);
+        HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) = USB_TXCSRL1_FLUSH;
+        HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) = USB_TXCSRL1_FLUSH;
+        musb_set_active_ep(old_ep);
+    }
+#endif
     usbh_kill_urb(urb);
     return ret;
 }
@@ -1729,7 +1772,13 @@ static void usbh_dma_rx_irq_handler(    uint8_t chn_idx, struct musb_pipe *pipe,
 
 static void usbh_dma_tx_irq_handler(    uint8_t chn_idx, struct musb_pipe *pipe, struct usbh_urb *urb)
 {
-    HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) |= USB_TXCSRL1_TXRDY;
+    /* FIX(babble): software raises TXRDY only for short (<mps) packets;
+     * full-mps packets are raised by AUTOSET. An unconditional set can land
+     * after the SIE cleared TXRDY on ACK, re-arming an empty/refilling FIFO
+     * and launching a short/malformed packet the peer drops (no ACK, stall). */
+    if (s_dma_tx_len[chn_idx] < pipe->ep_mps) {
+        HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) |= USB_TXCSRL1_TXRDY;
+    }
 }
 
 void usbh_musb_connect_set_status()
@@ -1762,6 +1811,9 @@ void USBH_IRQHandler(void)
     USB_LOG_VBS("%s is: 0x%x txis: 0x%x rxis:0x%x\r\n", __func__, is, txis, rxis);
 
     if ((is & USB_IS_DISCON) || (is & USB_IS_BABBLE)) {
+        USB_LOG_RAW("[USB-ERR] is=0x%02x discon=%u babble=%u txis=0x%04x rxis=0x%04x\r\n",
+                    (unsigned)is, !!(is & USB_IS_DISCON), !!(is & USB_IS_BABBLE),
+                    (unsigned)txis, (unsigned)rxis);
         USB_LOG_DBG("%s USB_IS_DISCON || USB_IS_BABBLE\r\n", __func__);
         usbh_roothub_thread_send_queue(1, (void *)usbh_musb_disconnect_set_status);
         musb_set_active_ep(old_ep_idx);
