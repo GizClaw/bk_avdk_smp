@@ -1556,6 +1556,7 @@ void sys_hal_low_power_hardware_init()
 	FIXED_ADDR_WAKEUP_AP1_COUNT     = 0x0;
 	FIXED_ADDR_WAKEUP_AP1_DEBUG     = 0x0;
 
-	(void)pm_shared_u64_store(&FIXED_ADDR_PM_AP_SLEEP_VOTE, 0U);
-	(void)pm_shared_u64_store(&FIXED_ADDR_PM_AP_CLK_VOTE_STATE, 0U);
+	pm_shared_u64_force_reset(&FIXED_ADDR_PM_AP_SLEEP_VOTE);
+	pm_shared_u64_force_reset(&FIXED_ADDR_PM_AP_CLK_VOTE_STATE);
+	pm_shared_u64_force_reset(&FIXED_ADDR_PM_MODULE_LV_SLEEP_STATE);
 }
