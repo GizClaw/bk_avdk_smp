@@ -34,6 +34,8 @@ void lv_port_disp_init(void);
 
 void lv_port_disp_deinit(void);
 
+void lv_port_disp_frame_buffer_reset(void);
+
 /* Enable updating the screen (the flushing process) when disp_flush() is called by LVGL
  */
 void disp_enable_update(void);

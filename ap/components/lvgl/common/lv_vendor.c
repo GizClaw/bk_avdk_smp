@@ -26,6 +26,8 @@ static u8 lvgl_task_state = STATE_INIT;
 static bool lv_vendor_initialized = false;
 lv_vnd_config_t vendor_config = {0};
 
+#define LVGL_FLUSH_DRAIN_TIMEOUT_MS 100
+
 #if LV_USE_LOG
 static void lv_log_print(lv_log_level_t level, const char * buf)
 {
@@ -397,6 +399,7 @@ void lv_vendor_start(void)
 void lv_vendor_stop(void)
 {
     bk_err_t ret;
+    lv_frame_msg_t msg;
 
     if (lvgl_task_state == STATE_STOP) {
         LOGD("%s already stop\n", __func__);
@@ -409,6 +412,19 @@ void lv_vendor_stop(void)
     if (BK_OK != ret) {
         LOGE("%s lvgl_sem get failed\n", __func__);
         return;
+    }
+
+    lv_port_disp_frame_buffer_reset();
+
+    while (rtos_pop_from_queue(&lvgl_frame_queue, &msg, BEKEN_NO_WAIT) == BK_OK) {
+    }
+
+    rtos_pop_from_queue(&lvgl_frame_queue, &msg, LVGL_FLUSH_DRAIN_TIMEOUT_MS);
+
+    for (int i = 0; i < CONFIG_LVGL_FRAME_BUFFER_NUM; i++) {
+        if (vendor_config.frame_buffer[i]) {
+            lv_vendor_set_ready_frame_buffer(vendor_config.frame_buffer[i]);
+        }
     }
 
     LOGD("%s complete\n", __func__);

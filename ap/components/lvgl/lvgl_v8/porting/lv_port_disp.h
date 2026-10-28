@@ -41,6 +41,8 @@ void lv_port_disp_init(void);
 
 void lv_port_disp_deinit(void);
 
+void lv_port_disp_frame_buffer_reset(void);
+
 /**********************
  *      MACROS
  **********************/

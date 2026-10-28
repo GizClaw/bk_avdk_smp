@@ -145,6 +145,13 @@ void lv_port_disp_deinit(void)
     disp_deinit();
 }
 
+void lv_port_disp_frame_buffer_reset(void)
+{
+    disp_buf = NULL;
+    copy_buf = NULL;
+    lv_new_frame_flag = true;
+}
+
 /**********************
  *   STATIC FUNCTIONS
  **********************/
