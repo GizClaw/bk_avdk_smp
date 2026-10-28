@@ -1065,6 +1065,11 @@ int bk_ipc_init(void)
         bk_ipc_info = bk_ipc_core_init(MB_CHNL_MIPC_SYNC);
     }
 
+    if (NULL == bk_ipc_info) {
+        LOGE("%s core init failed\n", __func__);
+        return BK_FAIL;
+    }
+
     stop_cpu1_register_notification(bk_ipc_cpu1_shutdown_callback, bk_ipc_info);
     bk_ipc_slave_core_state_change(bk_ipc_info, IPC_CPU_STARTUP);
 

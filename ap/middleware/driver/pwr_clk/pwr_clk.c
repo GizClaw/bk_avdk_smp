@@ -381,6 +381,44 @@ static bk_err_t pm_psram_proxy_complete(void)
 	return local_result;
 }
 
+/*
+ * Only cacheable PSRAM task stacks need a confirmed CP power state before the
+ * caller may touch PSRAM. Every other build keeps the pre-proxy contract in
+ * which the acknowledge is advisory: the first AP PSRAM allocation runs while
+ * the CP low power task is still starting, so reporting the missing
+ * acknowledge fails that allocation and blocks startup.
+ * A quarantined transaction is dropped as well, otherwise one unanswered vote
+ * rejects every later vote of this boot. A late acknowledge is discarded while
+ * the proxy is IDLE, which is what the pre-proxy code did.
+ */
+static bk_err_t pm_psram_vote_without_ack(
+	pm_power_psram_module_name_e module,
+	pm_power_module_state_e power_state,
+	bool quarantined)
+{
+#if defined(CONFIG_CACHEABLE_PSRAM_TASK_STACK) && CONFIG_CACHEABLE_PSRAM_TASK_STACK
+	(void)module;
+	(void)power_state;
+	(void)quarantined;
+	return BK_FAIL;
+#else
+	uint32_t expected = PM_PSRAM_PROXY_QUARANTINE;
+
+	if (quarantined) {
+		__atomic_store_n(
+			&s_pm_psram_proxy_request, UINT32_MAX, __ATOMIC_RELEASE);
+		(void)__atomic_compare_exchange_n(
+			&s_pm_psram_proxy_state, &expected,
+			PM_PSRAM_PROXY_IDLE, false,
+			__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+	}
+	if (power_state == PM_POWER_MODULE_STATE_ON) {
+		bk_pm_ap_psram_power_state_handle_callback(module, power_state);
+	}
+	return BK_OK;
+#endif
+}
+
 static bk_err_t pm_psram_stack_begin(
 	uint32_t sleep_state, uint32_t *request_id)
 {
@@ -864,12 +902,12 @@ bk_err_t bk_pm_module_vote_psram_ctrl(pm_power_psram_module_name_e module,pm_pow
 	if(!bk_pm_cp1_psram_power_state_get()) {
 		if (pm_psram_proxy_timeout() != BK_OK) {
 			LOGE("cp1 get psram state time out\r\n");
-			return BK_FAIL;
+			return pm_psram_vote_without_ack(module, power_state, true);
 		}
 	}
 	if(s_pm_psram_power_result != BK_OK) {
 		ret = pm_psram_proxy_complete();
-		return BK_FAIL;
+		return pm_psram_vote_without_ack(module, power_state, false);
 	}
 	ret = pm_psram_proxy_complete();
 	if(ret != BK_OK) {
