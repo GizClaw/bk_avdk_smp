@@ -303,6 +303,13 @@ static int mbedtls_alloc_tmp_reg_and_sram( unsigned char len_id,
             tries++;
         }
     } while ( ( ret == DBH_ACA_REG_SRAM_ALLOC_FAIL_ERR ) && ( tries <= 1 ) );
+
+    if ( ( ret != 0 ) && ( tmp_reg != INVALID_REG_INDEX ) )
+    {
+        /* Roll back the register index already allocated if the SRAM allocation fails. */
+        aca_reg_index_free( tmp_reg );
+        tmp_reg = INVALID_REG_INDEX;
+    }
 finish:
     *regT = tmp_reg;
 #ifdef AYSMC_DEBUG
@@ -342,21 +349,56 @@ static int mbedtls_alloc_sram_for_dedicate_reg( unsigned char len_id,
                                                 unsigned char *regT1,
                                                 unsigned char *regNp )
 {
-    int ret;
+    int ret = 0;
+    unsigned char doneT0 = 0, doneT1 = 0, doneNp = 0;
     if ( NULL != regT0 )
     {
-        MBEDTLS_MPI_CHK( mbedtls_alloc_tmp_reg_and_sram( len_id, regT0 ) );
+        ret = mbedtls_alloc_tmp_reg_and_sram( len_id, regT0 );
+        if ( ret != 0 )
+        {
+            goto cleanup;
+        }
+        doneT0 = 1;
     }
     if ( NULL != regT1 )
     {
-        MBEDTLS_MPI_CHK( mbedtls_alloc_tmp_reg_and_sram( len_id, regT1 ) );
+        ret = mbedtls_alloc_tmp_reg_and_sram( len_id, regT1 );
+        if ( ret != 0 )
+        {
+            goto cleanup;
+        }
+        doneT1 = 1;
     }
     if ( NULL != regNp )
     {
-        MBEDTLS_MPI_CHK( mbedtls_alloc_tmp_reg_and_sram( len_id, regNp ) );
+        ret = mbedtls_alloc_tmp_reg_and_sram( len_id, regNp );
+        if ( ret != 0 )
+        {
+            goto cleanup;
+        }
+        doneNp = 1;
     }
 
 cleanup:
+    if ( ret != 0 )
+    {
+        /* Roll back previous allocations; a failed entry is left as INVALID by the allocator. */
+        if ( 1 == doneT0 )
+        {
+            mbedtls_free_tmp_reg_and_sram( *regT0 );
+            *regT0 = INVALID_REG_INDEX;
+        }
+        if ( 1 == doneT1 )
+        {
+            mbedtls_free_tmp_reg_and_sram( *regT1 );
+            *regT1 = INVALID_REG_INDEX;
+        }
+        if ( 1 == doneNp )
+        {
+            mbedtls_free_tmp_reg_and_sram( *regNp );
+            *regNp = INVALID_REG_INDEX;
+        }
+    }
 #ifdef AYSMC_DEBUG
     if ( ret != 0 )
     {
@@ -622,7 +664,7 @@ static int mbedtls_calc_np( unsigned char len_id,
                             unsigned int sizeNbits,
                             unsigned char *NP )
 {
-    int ret, tries = 0;
+    int ret = 0, tries = 0;
     unsigned int A = DBH_ACA_WORD_SIZE_IN_BITS;
     unsigned int X = ACA_EXTRA_BITS;
     unsigned int tmp_bits;
@@ -684,6 +726,11 @@ cleanup:
     mbedtls_free_sram_for_dedicate_reg( &hwT0, &hwT1, NULL );
     mbedtls_free_tmp_reg_and_sram( swT0 );
     mbedtls_free_tmp_reg_and_sram( swT1 );
+    if ( ret != 0 )
+    {
+        /* On failure tmpNP has not been handed over to the caller yet; free it here. */
+        mbedtls_free_tmp_reg_and_sram( tmpNP );
+    }
 #ifdef AYSMC_DEBUG
     if ( ret != 0 )
     {
@@ -1825,6 +1872,7 @@ int mbedtls_mpi_cmp_abs( const mbedtls_mpi *X, const mbedtls_mpi *Y )
     int ret = -1;
     unsigned char T1, T2, len_id, swT0;
 
+    swT0 = INVALID_REG_INDEX; /* Avoid freeing an uninitialized handle on the error path. */
     HW_OPS_MUTEX_LOCK;
     if ( ( ret = mbedtls_get_len_id( &len_id,
                                      (mbedtls_mpi *) X,
@@ -1849,6 +1897,7 @@ int mbedtls_mpi_cmp_abs( const mbedtls_mpi *X, const mbedtls_mpi *Y )
                &T2, (mbedtls_mpi *) Y, len_id, DBH_TRUE, DBH_FALSE ) )
          != 0 )
     {
+        mbedtls_reset_op_flag( (mbedtls_mpi *) X ); /* X is already in a register; reset its op flag too. */
         HW_OPS_MUTEX_UNLOCK;
         mbedtls_reset_op_flag( (mbedtls_mpi *) Y );
         return ret;
@@ -1871,6 +1920,7 @@ static int _mbedtls_mpi_cmp_mpi( const mbedtls_mpi *X, const mbedtls_mpi *Y )
     int status = 0;
     unsigned char T1, T2, len_id, swT0;
 
+    swT0 = INVALID_REG_INDEX; /* Avoid freeing an uninitialized handle on the error path. */
     if ( X->s > 0 && Y->s < 0 )
     {
         return 1;
@@ -1908,9 +1958,9 @@ static int _mbedtls_mpi_cmp_mpi( const mbedtls_mpi *X, const mbedtls_mpi *Y )
                &T2, (mbedtls_mpi *) Y, len_id, DBH_TRUE, DBH_FALSE ) )
          != 0 )
     {
-        mbedtls_reset_op_flag( (mbedtls_mpi *) Y );
         ret = DBH_ACA_GENERIC_ERR;
-        goto error;
+        /* Fall through to the shared cleanup so both X and Y op flags are reset. */
+        goto cleanup;
     }
 
     MBEDTLS_MPI_CHK( mbedtls_alloc_tmp_reg_and_sram( len_id, &swT0 ) );
@@ -2322,7 +2372,8 @@ static int _mbedtls_mpi_mul_mpi( mbedtls_mpi *X,
     int ret;
     unsigned char T1, T2, len_id, swT0, swT1;
     size_t len = 0;
-    mbedtls_mpi R;
+    /* Zero-initialized so the cleanup path can free it safely on early errors. */
+    mbedtls_mpi R = {0};
 
     if ( ( ret = mbedtls_get_len_id( &len_id,
                                      (mbedtls_mpi *) A,
