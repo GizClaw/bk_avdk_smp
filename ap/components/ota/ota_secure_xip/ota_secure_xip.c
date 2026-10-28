@@ -294,16 +294,28 @@ static int secure_xip_init(f_ota_t *ota_ptr)
 
 	OTA_CHECK_POINTER(ota_ptr);
 
-	OTA_MALLOC(ota_ptr->wr_buf, OTA_FLASH_BUFFER_LENGTH);
-	OTA_MALLOC(ota_ptr->wr_tmp_buf, OTA_TEMP_FLASH_BUFFER_LENGTH);
-	OTA_MALLOC(ota_ptr->rd_buf, OTA_FLASH_BUFFER_LENGTH);
-
 	os_memset(&s_secure_xip, 0, sizeof(s_secure_xip));
 	s_secure_xip.phase        = SECURE_XIP_PHASE_HEADER;
 	s_secure_xip.last_log_pct = -10;
+	/* Resolve the staging slot first so init fails fast when partition
+	 * info is missing, before any buffer allocation is attempted. */
 	if (secure_xip_resolve_slot(&running) != BK_OK) {
 		return BK_FAIL;
 	}
+
+	ota_ptr->wr_buf     = (void *)os_malloc(OTA_FLASH_BUFFER_LENGTH);
+	ota_ptr->wr_tmp_buf = (void *)os_malloc(OTA_TEMP_FLASH_BUFFER_LENGTH);
+	ota_ptr->rd_buf     = (void *)os_malloc(OTA_FLASH_BUFFER_LENGTH);
+
+	if ((ota_ptr->wr_buf == NULL) || (ota_ptr->wr_tmp_buf == NULL) ||
+	    (ota_ptr->rd_buf == NULL)) {
+		OTA_LOGE("secure xip: buffer malloc fail\r\n");
+		goto fail;
+	}
+	os_memset(ota_ptr->wr_buf, 0, OTA_FLASH_BUFFER_LENGTH);
+	os_memset(ota_ptr->wr_tmp_buf, 0, OTA_TEMP_FLASH_BUFFER_LENGTH);
+	os_memset(ota_ptr->rd_buf, 0, OTA_FLASH_BUFFER_LENGTH);
+
 	s_secure_xip.write_addr = s_secure_xip.update_slot_base;
 
 	ota_ptr->wr_last_len         = 0;
@@ -317,6 +329,13 @@ static int secure_xip_init(f_ota_t *ota_ptr)
 			 running, s_secure_xip.update_slot,
 			 s_secure_xip.update_slot_base, s_secure_xip.update_slot_size);
 	return BK_OK;
+
+fail:
+	/* Release any buffers allocated so far on the failure path. */
+	OTA_FREE(ota_ptr->wr_buf);
+	OTA_FREE(ota_ptr->wr_tmp_buf);
+	OTA_FREE(ota_ptr->rd_buf);
+	return BK_FAIL;
 }
 
 static int secure_xip_data_process(f_ota_t *ota_ptr, uint16_t len,
