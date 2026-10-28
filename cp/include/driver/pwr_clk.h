@@ -130,6 +130,21 @@ static inline bool pm_shared_u64_store(
 	return false;
 }
 
+/* A reset landing between a writer's two version increments leaves the version
+ * odd forever: the retry loops only ever observe the half-finished update and
+ * give up, and the field survives a soft reboot. Reclaiming it therefore must
+ * not take the seqlock, so only the core owning PM init may call this, before
+ * any other core can vote. */
+static inline void pm_shared_u64_force_reset(
+	volatile pm_shared_u64_words_t *field)
+{
+	(void)__atomic_exchange_n(&field->version, 1U, __ATOMIC_ACQ_REL);
+	__atomic_store_n(&field->low, 0U, __ATOMIC_RELAXED);
+	__atomic_store_n(&field->high, 0U, __ATOMIC_RELAXED);
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	__atomic_store_n(&field->version, 2U, __ATOMIC_RELEASE);
+}
+
 static inline bool pm_shared_u64_bit_get(
 	const volatile pm_shared_u64_words_t *field, uint32_t bit)
 {
